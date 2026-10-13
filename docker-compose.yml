@@ -14,6 +14,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # 默认装轻量镜像（不含 torch，约省 2GB+ 下载与数分钟构建）。
+        # 想用本地 BGE embedding / 真 Reranker 的质量：
+        #   docker compose build --build-arg INSTALL_LOCAL=true && docker compose up
+        # 否则会拿到 EMBEDDING_PROVIDER=local 却缺 FlagEmbedding，启动时检索会明确报错。
+        INSTALL_LOCAL: "false"
     image: paperpilot-api:latest
     ports:
       - "8000:8000"
@@ -29,6 +35,18 @@ services:
       SQLITE_URL: sqlite+aiosqlite:////app/data/sqlite/paperpilot.db
       # ⚠️ 必须与 Dockerfile 里的 HF_HOME 保持一致，否则模型权重缓存不到挂载点
       HF_HOME: /app/.cache/huggingface
+      # ---- 零 key 冷启动默认值 ----
+      # `${VAR:-默认}` 由 compose 从宿主 .env（若存在）注入：
+      # 配了就用你的，没配就退回 mock，保证「clone 下来直接 docker compose up」也能跑通全链路。
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-mock}
+      RERANK_ENABLED: ${RERANK_ENABLED:-false}
+    command:
+      # 先补齐离线样例语料（幂等：库里已有论文就原样跳过），再起服务。
+      # 没有这一步，全新用户的 `data/` 是空的，第一次提问会直接去联网抓 arXiv。
+      - sh
+      - -c
+      - python scripts/load_sample_data.py; exec uvicorn app.main:app --host 0.0.0.0 --port 8000
     volumes:
       - faiss_index:/app/data/faiss          # 向量索引
       - sqlite_data:/app/data/sqlite         # 元数据 + LangGraph checkpoint

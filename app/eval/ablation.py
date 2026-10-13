@@ -43,7 +43,10 @@ from app.retrieval.hybrid_retriever import HybridRetriever, MetadataFilter, Sear
 # 默认输出落在项目根的 eval_results/。用 __file__ 定位而非相对 CWD ——
 # 否则从任意目录执行 `python -m app.eval.ablation` 都会把文件写到别处（甚至找不到）。
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OUTPUT = PROJECT_ROOT / "eval_results" / "ablation.md"
+# 默认名带 `_latest`：README 承诺"仓库里只保留两份登记过的报告"，
+# 而无版本号的 `ablation.md` 一旦被人随手跑出来就会被误当成证据文件提交进仓库。
+# 换个名字，让"这是刚跑的输出"这件事写在文件名上。
+DEFAULT_OUTPUT = PROJECT_ROOT / "eval_results" / "ablation_latest.md"
 
 
 # --------------------------------------------------------------------------- 配置

@@ -14,9 +14,8 @@
    由 `route_after_corpus` 走"语料不足"分支，**显式声明检索覆盖度**，
    而不是假装检索到了东西。
 
-⚠️ 与主 agent 的接口待确认：本节点目前**无条件监听 `MIN_CORPUS` 阈值**，
-若主 agent 想在 API 层控制"是否允许联网抓取"，建议在 `Settings` 增加
-`ingest_enabled: bool`（见交付报告的"需要决策"）。这里不擅自改 config.py。
+4. **离线可关**：`INGEST_ENABLED=false` 时本节点完全不联网，只用库里已有语料，
+   并把覆盖度如实交出去 —— 供离线演示、CI 与"我只想要本地索引"的部署使用。
 """
 
 from __future__ import annotations
@@ -101,7 +100,11 @@ async def ensure_corpus_node(state: ResearchState) -> dict:
     fetched = cached = 0
     corpus_error: str | None = None
 
-    if len(titles) < settings.min_corpus:
+    if len(titles) < settings.min_corpus and not settings.ingest_enabled:
+        # INGEST_ENABLED=false：离线/CI 模式。不联网，只用库里已有的东西，
+        # 并按同一口径如实声明覆盖度（corpus_ready 由下面的阈值判断给出）。
+        logger.info("ensure_corpus.ingest_disabled", local=len(titles), need=settings.min_corpus)
+    elif len(titles) < settings.min_corpus:
         # 语料不足 → 联网抓取。失败**不中断**：本地已有多少就用多少，
         # 只是把 corpus_ready 置 False，让下游如实声明覆盖度（架构 §2.2 兜底）。
         query = build_ingest_query(state)
@@ -122,14 +125,20 @@ async def ensure_corpus_node(state: ResearchState) -> dict:
             corpus_error = str(exc)[:200]
             logger.warning("ensure_corpus.ingest_failed", error=corpus_error)
 
-    # 索引刷新：**无条件重建**。
-    # 为什么不"索引非空就跳过"：embedding 模型、分块策略、chunk 内容任一变化，
-    # 旧索引都会静默失真（不报错，只是结果变差）。这类"静默陈旧"是本项目
-    # 反复出现的风险（见 hybrid_retriever 里 load_meta 的注释），宁可每次重建。
-    # 代价：每次研究都要重算 embedding。生产优化应加入基于 chunk 内容指纹的跳过判断。
+    # 索引刷新：**内容指纹没变就复用，变了必然重建**。
+    # 为什么不是"索引非空就跳过"：embedding 模型、分块策略、chunk 内容任一变化，
+    # 旧索引都会静默失真（不报错，只是结果变差）—— 这类"静默陈旧"是本项目反复出现的风险。
+    # 为什么也不是"无条件重建"（本节点此前的做法）：那等于每次提问都把全部 chunk
+    # 重新 encode 一遍，本地 BGE 下以分钟计，直接把验收标准"单次研究 < 3 分钟"打掉。
+    # 指纹（corpus_digest）把两种失败模式同时堵住：内容没变 → 秒级跳过；内容变了 → 必然重建。
     retriever = get_shared_retriever()
-    await retriever.build_index(records, titles)
-    reset_shared_retriever()  # 索引已换，丢弃可能持有旧索引的引用
+    if retriever.index_is_current(records, titles):
+        logger.info("ensure_corpus.index_reused", chunks=len(records))
+        index_action = "reused"
+    else:
+        await retriever.build_index(records, titles)
+        reset_shared_retriever()  # 索引已换，丢弃可能持有旧索引的引用
+        index_action = "rebuilt"
 
     corpus_ready = len(titles) >= settings.min_corpus
     stats = {
@@ -139,6 +148,7 @@ async def ensure_corpus_node(state: ResearchState) -> dict:
         "chunks": len(records),
         "corpus_ready": corpus_ready,
         "threshold": settings.min_corpus,
+        "index": index_action,
         "error": corpus_error,
     }
     if not corpus_ready:
@@ -157,6 +167,7 @@ async def ensure_corpus_node(state: ResearchState) -> dict:
                 corpus_ready=corpus_ready,
                 chunks=len(records),
                 threshold=settings.min_corpus,
+                index=index_action,
             )
         ],
     }

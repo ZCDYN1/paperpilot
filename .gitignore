@@ -45,8 +45,19 @@ logs/
 coverage.xml
 htmlcov/
 
+# ---------- 抽检 CSV：从本地库抽样的机器相关产物，不入库 ----------
+# 人工判定完成后若想作为证据提交，另存为 *_labeled.csv（下面这行放行它）
+eval_results/citation_spotcheck.csv
+!eval_results/citation_spotcheck_labeled.csv
+
+# ---------- 消融报告的重新生成产物 ----------
+# README 只登记两份报告；`make eval-ablation` 每次都会覆写 ablation_latest.md，
+# 它的索引/查询口径与那两份不同轮，留在工作区里只会被误当证据提交。
+eval_results/ablation_latest.md
+
 # ---------- 临时产物（调试/排查时容易产生，别带进仓库）----------
 _pptmp/
+runart/
 *.tmp
 pytest_out*.txt
 run[0-9].txt

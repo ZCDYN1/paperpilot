@@ -62,9 +62,18 @@ def render_document(
     它靠这个结构"读懂"自己被喂了什么文档，从而产出与真实文档对齐的
     `chunk_id / paper_id / quote`。改动字段名会同时影响 mock 与真实链路，
     所以两侧都用正则锁定格式、并有单测守着。
+
+    ★ 属性名必须与 schema 的字段名**逐字同名**（`chunk_id`，不是 `id`）。
+    这条是实测换来的：上一版渲染的是 `id="370" arxiv_id="2503.16581"`，
+    而输出字段叫 `paper_id` / `chunk_id`。本地 qwen2.5:7b 把块里那个唯一可见的
+    纯数字填进了 `paper_id`、`chunk_id` 留空（日志形态 `paper=370 chunk=None`），
+    于是查表第一步就 miss、整条引用被判幻觉丢掉。属性名改成 `chunk_id` 后
+    "看到的名字 = 要填的字段名"，模型不需要再做一次 id→chunk_id 的语义映射，
+    错位从源头消失。兜底纠正仍留在 `nodes/evidence.py`（模型仍可能出错，
+    但那时它已经是需要统计的残差，而不是系统性故障）。
     """
     attrs = [
-        f'id="{_escape_attr(str(chunk_id))}"',
+        f'chunk_id="{_escape_attr(str(chunk_id))}"',
         f'arxiv_id="{_escape_attr(str(arxiv_id))}"',
         f'section="{_escape_attr(str(section))}"',
         f'source="{_escape_attr(str(source))}"',

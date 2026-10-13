@@ -302,9 +302,9 @@ def _grounded_value(name: str, prompt: str, index: int) -> Any:
     if name in ("paper_id", "arxiv_id"):
         return doc.get("arxiv_id") or None
     if name == "chunk_id":
-        # prompt 里渲染的文档块用 `id` 作为属性名（见 prompts.render_document），
-        # 而 schema 侧字段叫 chunk_id —— mock 必须自己完成这次名称映射
-        raw = doc.get("chunk_id") or doc.get("id")
+        # 渲染属性与 schema 字段同名（prompts.render_document 刻意如此，见其 docstring），
+        # 所以这里不再需要 id→chunk_id 的名称映射。
+        raw = doc.get("chunk_id")
         return int(raw) if raw and str(raw).isdigit() else None
     if name in ("quote", "evidence", "snippet"):
         body = re.sub(r"\s+", " ", doc.get("text", "")).strip()
@@ -463,12 +463,14 @@ def get_llm(temperature: float | None = None) -> BaseChatModel:
         )
 
     if s.llm_provider == "ollama":
-        # langchain-community 与 langchain-ollama 两个包都可能有 ChatOllama，
-        # 优先用社区版（依赖已装），缺失时再退回官方包 —— 少一次"ImportError 才发现"。
+        # 优先官方 langchain-ollama：社区版 ChatOllama 已在 LangChain 0.3 废弃，
+        # 且它的 with_structured_output 直接抛 NotImplementedError ——
+        # 而 plan/read/verify/revise 四个节点全部依赖 structured output，
+        # 选了社区版就等于"ollama 只能聊天、跑不了图"。社区版仅作兜底。
         try:
-            from langchain_community.chat_models import ChatOllama
+            from langchain_ollama import ChatOllama
         except ImportError:  # pragma: no cover - 取决于安装形态
-            from langchain_ollama import ChatOllama  # type: ignore[no-redef]
+            from langchain_community.chat_models import ChatOllama  # type: ignore[no-redef]
 
         return ChatOllama(
             model=s.ollama_model, base_url=s.ollama_base_url, temperature=t, callbacks=[meter]

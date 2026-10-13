@@ -27,6 +27,7 @@ from app.eval.ablation import (
     select_configs,
 )
 from app.eval.dataset import GoldenItem
+from app.eval.metrics import recall_at_k
 from app.retrieval.hybrid_retriever import HybridRetriever, MetadataFilter, SearchConfig
 from tests.conftest import (
     BROAD_KEYWORDS,
@@ -233,3 +234,43 @@ def test_select_configs_parsing():
 
     with pytest.raises(ValueError):
         select_configs("不存在的配置")
+
+
+# --------------------------------------------------------------------- ★ paper 级口径
+async def test_ablation_scores_are_paper_level_not_chunk_level(retriever, corpus):
+    """架构 §5.2 / §5.3 的硬口径：Recall@5 / nDCG@10 都是 **paper 级**
+    （先 chunk 检索 → paper 聚合 → 再算指标），本用例把"两种口径会得出不同数字"钉住。
+
+    受控语料里论文 A 有 4 个 chunk，而聚合上限是每篇 2 个：
+    同一批检索结果，paper 级 Recall@5 = 1/1 = 1.0，chunk 级只有 2/4 = 0.5。
+    数字不同不是 bug，而是口径 —— 所以谁把 `ranked` 换成 chunk 编号（或把金标准写成
+    chunk），整张消融表就会在同一秒变成一份无法与文档对照的表，红的必须是这里。
+    """
+    records, _titles = corpus
+    gold_chunks_of_a = {str(r.chunk_id) for r in records if r.arxiv_id == PAPER_A}
+    assert len(gold_chunks_of_a) == 4, "前置条件：论文 A 的 chunk 数必须多于聚合上限"
+
+    result = (await run_ablation(retriever, [_item()], configs=[ABLATION_CONFIGS[3]]))[0]
+    ranked = result.ranked[0]
+
+    # ① 进指标的是去重后的 arxiv_id（paper 级），不是 chunk 编号
+    assert all(rid in {PAPER_A, PAPER_B, PAPER_C} for rid in ranked)
+    assert len(ranked) == len(set(ranked)), "同一篇论文不该在 paper 级榜单里出现两次"
+    assert PAPER_A in ranked
+    # ② 汇总指标确实是从这份 paper 级列表算出来的（没有旁路再算一遍别的口径）
+    assert result.metrics.recall_at_5 == pytest.approx(recall_at_k(ranked, {PAPER_A}, 5))
+    assert result.metrics.recall_at_5 == pytest.approx(1.0)
+
+    # ③ 同一批结果摊平成 chunk 级 → 明显更低的数字（两者不可混用）
+    hits = await retriever.search(FOCUSED_QUERY, FOCUSED_KEYWORDS, top_k=10)
+    chunk_ranked = [str(c.chunk_id) for hit in hits for c in hit.chunks]
+    assert len(chunk_ranked) > len(ranked), "chunk 级列表应比 paper 级更长，否则对比无意义"
+    assert recall_at_k(chunk_ranked, gold_chunks_of_a, 5) < result.metrics.recall_at_5
+
+
+async def test_markdown_declares_the_paper_level_caliber(retriever):
+    """报告必须自带口径声明：消融表的数字脱离口径就没有可读性（§5.2 的统一要求）。"""
+    md, _ = await run_and_render(retriever, [_item()], configs=[ABLATION_CONFIGS[3]])
+
+    assert "paper 级" in md
+    assert "先 chunk 检索 → paper 聚合 → 再算指标" in md

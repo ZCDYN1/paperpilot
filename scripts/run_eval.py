@@ -58,7 +58,7 @@ async def _run_ablation(args: argparse.Namespace, output_dir: Path) -> int:
     print(f"  golden 集：{len(items)} 条查询")
     print()
 
-    out = Path(args.output) if args.output else output_dir / "ablation.md"
+    out = Path(args.output) if args.output else output_dir / "ablation_latest.md"
     markdown, _results = await run_and_render(
         retriever, items, settings=settings, golden_path=args.golden, top_k=args.top_k
     )

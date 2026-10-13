@@ -9,10 +9,16 @@
 1. **LLM 配好了吗** —— `llm_configured`
 2. **Embedding 配好了吗** —— `embedding.ready`（缺依赖 / 缺 key 都会说清是哪一种）
 3. ⭐ **索引和我现在的 embedding 配置匹配吗** —— `index.compatible`
+4. **容错层现在是什么状态** —— `resilience.breakers`（LLM / HTTP 两个熔断器的三态与拦截计数）
+5. **追踪到底生效了没** —— `tracing.enabled`（配了 key ≠ 在上报，这里给确定答案）
 
 第 3 条最容易被忽略，却最致命：换了 embedding 模型却不重建索引时，
 检索会静默退化成噪声（维度相同的话连报错都没有）。
 所以这里直接把"该跑哪条命令"告诉你。
+
+第 4、5 条是"工程化承诺的可核查面"：README 说"重试 / 超时 / 熔断"和"LangSmith 全链路追踪"，
+运维不需要读源码、也不需要等出事，打开 /healthz 就能看到熔断器叫什么、现在是不是打开着、
+以及 trace 是否真的在上报。
 """
 
 from __future__ import annotations
@@ -24,6 +30,8 @@ from fastapi import APIRouter
 
 from app import __version__
 from app.core.config import Settings, get_settings
+from app.core.resilience import breaker_snapshot
+from app.observability.tracing import tracing_status
 from app.retrieval.embedder import get_embedder
 
 router = APIRouter(tags=["health"])
@@ -94,4 +102,27 @@ async def healthz() -> dict:
         **settings.summary(),
         "embedding": embedding,
         "index": _index_status(settings, embedding.get("identity")),
+        # 容错与追踪的"开关面板"（脱敏：只有状态与阈值，绝无 key）
+        "resilience": {
+            "enabled": settings.resilience_enabled,
+            "input_guard": settings.input_guard_enabled,
+            "breakers": breaker_snapshot(),
+        },
+        "tracing": tracing_status(settings),
+    }
+
+
+@router.get("/resilience", summary="熔断器实时状态（运维排查用）")
+async def resilience_state() -> dict:
+    """单独开一个只读端点：/healthz 是容器 healthcheck 在高频打的，
+    而"哪些下游正被熔断、拦掉了多少次"是人工排查时才看的东西。
+
+    `GET /healthz` 里也有同一份数据；这里只是给一个更窄、更适合 `watch` 的入口。
+    """
+    settings = get_settings()
+    return {
+        "enabled": settings.resilience_enabled,
+        "timeout_budget": settings.resilience_timeout,
+        "attempts": settings.resilience_attempts,
+        "breakers": breaker_snapshot(),
     }

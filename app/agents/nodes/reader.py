@@ -34,10 +34,14 @@ import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.agents.nodes._common import (
-    chunk_index,
     dedup_papers,
     node_event,
     structured_invoke,
+)
+from app.agents.nodes.evidence import (
+    build_chunk_lookup,
+    build_paper_chunks,
+    resolve_citation,
 )
 from app.agents.prompts import load_prompt, render_papers_block
 from app.agents.schemas import ReadOutput
@@ -112,12 +116,27 @@ async def read_node(state: ResearchState) -> dict:
         ),
     ]
 
+    # 反幻觉闸门 + 引文重锚（见 nodes/evidence.py）：
+    # `(paper_id, chunk_id)` 对不上时，先按逐字引文在同篇片段里重锚；
+    # 重锚不成功才算幻觉剔除。这样"模型打错一个自增编号"不再等于"编造证据"。
+    papers_by_id = build_paper_chunks(retrieved)
+    chunk_lookup = build_chunk_lookup(retrieved)
+    rendered_chunk_ids: set[int] = set()
+    for paper in top:
+        for chunk in (paper.get("chunks") or [])[: settings.max_chunks_per_paper]:
+            if chunk.get("chunk_id") is not None:
+                rendered_chunk_ids.add(int(chunk["chunk_id"]))
+
     # 单篇失败不拖垮全流程（架构 §11）：这里是一批论文一次调用，
     # 所以失败时把整批计入 failed_papers 并**降级继续**（readings 为空），
     # 而不是让异常冒泡把整次研究打断 —— 用户拿到"部分结果"远好于拿到一个报错。
-    known_chunks = chunk_index(retrieved)
     try:
         parsed, usage = await structured_invoke(ReadOutput, messages)
+        if parsed is None:
+            # `include_raw=True` 下解析失败**不抛异常**，只是 `parsed=None`。
+            # 必须在这里当失败处理：否则下一行 `parsed.claims` 抛 AttributeError，
+            # 把"模型输出不合规"这个可降级的事件变成整次研究 500。
+            raise ValueError("结构化输出解析失败（模型未按要求产出 claims）")
     except Exception as exc:  # noqa: BLE001
         failed = [p["arxiv_id"] for p in top]
         logger.warning("read.extract_failed", error=str(exc)[:200], papers=len(failed))
@@ -136,19 +155,54 @@ async def read_node(state: ResearchState) -> dict:
     readings: list[dict] = []
     citations: list[Evidence] = []
     dropped = 0
+    recovered = 0
+    recovered_by: dict[str, int] = {}
+    drop_reasons: dict[str, int] = {}
     for item in parsed.claims:
-        key = (item.paper_id, item.chunk_id) if item.chunk_id is not None else None
-        chunk = known_chunks.get(key) if key else None
-        if chunk is None:
-            # 反幻觉（架构 §10 输出侧）：引用必须能在本次检索结果集合里找到对应 chunk，
-            # 找不到就是幻觉，**剔除**而不是"存疑保留"——存疑的引用最终一定会被写进报告。
+        hit = resolve_citation(
+            papers_by_id,
+            paper_id=item.paper_id,
+            chunk_id=item.chunk_id,
+            quote=item.quote,
+            rendered_chunk_ids=rendered_chunk_ids,
+            chunk_lookup=chunk_lookup,
+            # read 侧只允许锚到"确实渲染给模型看过"的片段：它没法引用自己没读过的东西
+            restrict_to_rendered=True,
+        )
+        if not hit.ok:
+            # 反幻觉（架构 §10 输出侧）：引文逐字找不到对应 chunk，就是幻觉，
+            # **剔除**而不是"存疑保留"——存疑的引用最终一定会被写进报告。
             dropped += 1
-            logger.warning("read.hallucinated_citation", paper=item.paper_id, chunk=item.chunk_id)
+            drop_reasons[hit.reason or "unknown"] = drop_reasons.get(hit.reason or "unknown", 0) + 1
+            # 带上引文开头：上一轮就是因为日志里只有 id、没有 quote，
+            # 才分不清"编号写错"与"引文被改写"这两种修法完全不同的失败，绕了一圈。
+            logger.warning(
+                "read.hallucinated_citation",
+                paper=item.paper_id,
+                chunk=item.chunk_id,
+                reason=hit.reason,
+                quote_head=item.quote[:60],
+            )
             continue
+        chunk = hit.chunk
+        paper_id = hit.paper_id or item.paper_id
+        if hit.recovered:
+            # id 写错了但引文是真的：救回来，并把归属改成引文真正所在的 chunk。
+            # `how` 进日志是为了能在真实分布上统计"哪条路径在生效"，而不是靠猜有效性。
+            recovered += 1
+            recovered_by[hit.how] = recovered_by.get(hit.how, 0) + 1
+            logger.info(
+                "read.citation_reanchored",
+                paper=paper_id,
+                claimed_paper=item.paper_id,
+                claimed_chunk=item.chunk_id,
+                actual_chunk=chunk.get("chunk_id"),
+                how=hit.how,
+            )
         readings.append(
             {
-                "paper_id": item.paper_id,
-                "chunk_id": item.chunk_id,
+                "paper_id": paper_id,
+                "chunk_id": chunk.get("chunk_id"),
                 "claim": item.claim,
                 "quote": item.quote,
                 "locator": item.locator or chunk.get("section", "abstract"),
@@ -160,8 +214,8 @@ async def read_node(state: ResearchState) -> dict:
         citations.append(
             {
                 "claim": item.claim,
-                "chunk_id": int(item.chunk_id),
-                "paper_id": item.paper_id,
+                "chunk_id": int(chunk["chunk_id"]),
+                "paper_id": paper_id,
                 "quote": item.quote,
                 "locator": item.locator or chunk.get("section", "abstract"),
                 "source": chunk.get("source", "abstract"),
@@ -169,7 +223,15 @@ async def read_node(state: ResearchState) -> dict:
             }
         )
 
-    logger.info("read.done", papers=len(top), claims=len(readings), dropped=dropped)
+    logger.info(
+        "read.done",
+        papers=len(top),
+        claims=len(readings),
+        dropped=dropped,
+        reanchored=recovered,
+        recovered_by=recovered_by or None,
+        drop_reasons=drop_reasons or None,
+    )
 
     return {
         "readings": readings,

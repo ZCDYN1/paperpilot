@@ -41,12 +41,27 @@ class ExtractionItem(BaseModel):
     ⚠️ `quote` 必须是**从原文逐字摘录**的片段，不允许改写/翻译/概括。
     Verifier 会用字符串包含关系去原文里核对它 —— 一旦模型"润色"了引文，
     校验就会失败，这正是我们想要的行为（宁缺毋滥）。
+
+    `paper_id` / `chunk_id` 的 description 写得很啰嗦，是因为实测发现小模型会把
+    文档块上的片段编号填进 `paper_id`（渲染属性已从 `id` 改名为 `chunk_id`，
+    见 `app/agents/prompts/render_document`）。字段级说明离"要填的那个格子"最近，
+    是纠正这类错位最便宜的一层；最后一道兜底在 `nodes/evidence.py`。
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    paper_id: str = Field(description="arXiv id，必须来自本次检索结果")
-    chunk_id: int | None = Field(default=None, description="证据所在的 chunk_id")
+    paper_id: str = Field(
+        description=(
+            "arXiv id，必须照抄证据所在文档块的 arxiv_id 属性（形如 2503.16581）。"
+            "⚠️ 不要填文档块的 chunk_id 那个纯数字 —— 两者填反了整条引用会被判幻觉。"
+        )
+    )
+    chunk_id: int = Field(
+        description=(
+            "证据所在片段的编号：照抄那个文档块的 chunk_id 属性值（纯数字），**必填**。"
+            "留空等于让系统去猜你引用的是哪一段。"
+        )
+    )
     claim: str = Field(min_length=1, description="该片段支持的中文论断（一句话）")
     quote: str = Field(min_length=1, description="原文片段，逐字摘录，越长越好但不超过 300 字")
     locator: str = Field(default="abstract", description="章节名 / 页码，便于用户回原文核对")

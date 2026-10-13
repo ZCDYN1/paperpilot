@@ -100,17 +100,23 @@ async def _persist(state: ResearchState, usage: dict[str, int], by_node: dict | 
             int(x) for x in (await session.execute(select(PaperChunk.id))).scalars().all()
         }
         for cit in citations:
-            cid = cit.get("chunk_id")
+            # ⚠️ verify 纠正过定位的引用，真实片段在 `resolved_chunk_id` 里（键名原因见
+            # `app/agents/state.py` 的 Evidence）：优先采用它，否则这条引用会落成 NULL，
+            # `/citations` 与人工抽检里的原文列就是空的。
+            cid = cit.get("resolved_chunk_id") or cit.get("chunk_id")
             session.add(
                 Citation(
                     run_id=run_id,
                     claim=cit.get("claim") or "",
                     chunk_id=int(cid) if cid is not None and int(cid) in valid_chunk_ids else None,
-                    arxiv_id=cit.get("paper_id"),
+                    arxiv_id=cit.get("resolved_paper_id") or cit.get("paper_id"),
                     quote=cit.get("quote") or "",
-                    locator=cit.get("locator"),
-                    source=cit.get("source"),
+                    locator=cit.get("resolved_locator") or cit.get("locator"),
+                    source=cit.get("resolved_source") or cit.get("source"),
                     verified=bool(cit.get("verified")),
+                    # 校验失败原因（硬校验/软校验的具体说明）落进 note，供人工抽检口径核对；
+                    # 通过的引用没有失败原因，保持 None 而不是空串，便于区分"没写"与"写了但为空"。
+                    note=(cit.get("verify_note") or None) if not cit.get("verified") else None,
                 )
             )
 

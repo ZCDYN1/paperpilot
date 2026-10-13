@@ -1,0 +1,937 @@
+{
+ "kind": "paperpilot-sample-corpus",
+ "version": 1,
+ "note": "离线样例语料：真实 arXiv 论文的元数据 + 摘要级分块（不含正文）。用于零 key、零联网跑通全链路；检索/引用质量以摘要级证据为准。",
+ "papers": [
+  {
+   "arxiv_id": "2306.08568",
+   "title": "WizardCoder: Empowering Code Large Language Models with Evol-Instruct",
+   "abstract": "Code Large Language Models (Code LLMs), such as StarCoder, have demonstrated exceptional performance in code-related tasks. However, most existing models are solely pre-trained on extensive raw code data without instruction fine-tuning. In this paper, we introduce WizardCoder, which empowers Code LLMs with complex instruction fine-tuning, by adapting the Evol-Instruct method to the domain of code. Through comprehensive experiments on four prominent code generation benchmarks, namely HumanEval, HumanEval+, MBPP, and DS-1000, we unveil the exceptional capabilities of our model. It surpasses all other open-source Code LLMs by a substantial margin. Moreover, our model even outperforms the largest closed LLMs, Anthropic's Claude and Google's Bard, on HumanEval and HumanEval+. Our code, model weights, and data are public at https://github.com/nlpxucan/WizardLM",
+   "authors": [
+    "Ziyang Luo",
+    "Can Xu",
+    "Pu Zhao",
+    "Qingfeng Sun",
+    "Xiubo Geng",
+    "Wenxiang Hu",
+    "Chongyang Tao",
+    "Jing Ma",
+    "Qingwei Lin",
+    "Daxin Jiang"
+   ],
+   "published": "2023-06-14T15:18:48",
+   "primary_category": "cs.CL",
+   "categories": [
+    "cs.CL",
+    "cs.AI"
+   ],
+   "venue": "ICLR 2024",
+   "cited_by_count": null,
+   "cited_at": null,
+   "referenced_works_count": null,
+   "is_open_access": null,
+   "oa_status": null,
+   "pdf_url": "https://arxiv.org/pdf/2306.08568v2",
+   "html_url": "https://arxiv.org/html/2306.08568",
+   "has_code": null,
+   "chunks": [
+    {
+     "chunk_index": 0,
+     "section": "abstract",
+     "chunk_type": "text",
+     "source": "abstract",
+     "text": "Code Large Language Models (Code LLMs), such as StarCoder, have demonstrated exceptional performance in code-related tasks. However, most existing models are solely pre-trained on extensive raw code data without instruction fine-tuning. In this paper, we introduce WizardCoder, which empowers Code LLMs with complex instruction fine-tuning, by adapting the Evol-Instruct method to the domain of code. Through comprehensive experiments on four prominent code generation benchmarks, namely HumanEval, HumanEval+, MBPP, and DS-1000, we unveil the exceptional capabilities of our model. It surpasses all other open-source Code LLMs by a substantial margin. Moreover, our model even outperforms the largest closed LLMs, Anthropic's Claude and Google's Bard, on HumanEval and HumanEval+. Our code, model weights, and data are public at https://github.com/nlpxucan/WizardLM",
+     "token_count": 216
+    }
+   ]
+  },
+  {
+   "arxiv_id": "2308.16149",
+   "title": "Jais and Jais-chat: Arabic-Centric Foundation and Instruction-Tuned Open Generative Large Language Models",
+   "abstract": "We introduce Jais and Jais-chat, new state-of-the-art Arabic-centric foundation and instruction-tuned open generative large language models (LLMs). The models are based on the GPT-3 decoder-only architecture and are pretrained on a mixture of Arabic and English texts, including source code in various programming languages. With 13 billion parameters, they demonstrate better knowledge and reasoning capabilities in Arabic than any existing open Arabic and multilingual models by a sizable margin, based on extensive evaluation. Moreover, the models are competitive in English compared to English-centric open models of similar size, despite being trained on much less English data. We provide a detailed description of the training, the tuning, the safety alignment, and the evaluation of the models. We release two open versions of the model -- the foundation Jais model, and an instruction-tuned Jais-chat variant -- with the aim of promoting research on Arabic LLMs. Available at https://huggingface.co/inception-mbzuai/jais-13b-chat",
+   "authors": [
+    "Neha Sengupta",
+    "Sunil Kumar Sahu",
+    "Bokang Jia",
+    "Satheesh Katipomu",
+    "Haonan Li",
+    "Fajri Koto",
+    "William Marshall",
+    "Gurpreet Gosal",
+    "Cynthia Liu",
+    "Zhiming Chen",
+    "Osama Mohammed Afzal",
+    "Samta Kamboj",
+    "Onkar Pandit",
+    "Rahul Pal",
+    "Lalit Pradhan",
+    "Zain Muhammad Mujahid",
+    "Massa Baali",
+    "Xudong Han",
+    "Sondos Mahmoud Bsharat",
+    "Alham Fikri Aji",
+    "Zhiqiang Shen",
+    "Zhengzhong Liu",
+    "Natalia Vassilieva",
+    "Joel Hestness",
+    "Andy Hock",
+    "Andrew Feldman",
+    "Jonathan Lee",
+    "Andrew Jackson",
+    "Hector Xuguang Ren",
+    "Preslav Nakov",
+    "Timothy Baldwin",
+    "Eric Xing"
+   ],
+   "published": "2023-08-30T17:07:17",
+   "primary_category": "cs.CL",
+   "categories": [
+    "cs.CL",
+    "cs.AI",
+    "cs.LG"
+   ],
+   "venue": null,
+   "cited_by_count": null,
+   "cited_at": null,
+   "referenced_works_count": null,
+   "is_open_access": null,
+   "oa_status": null,
+   "pdf_url": "https://arxiv.org/pdf/2308.16149v2",
+   "html_url": "https://arxiv.org/html/2308.16149",
+   "has_code": null,
+   "chunks": [
+    {
+     "chunk_index": 0,
+     "section": "abstract",
+     "chunk_type": "text",
+     "source": "abstract",
+     "text": "We introduce Jais and Jais-chat, new state-of-the-art Arabic-centric foundation and instruction-tuned open generative large language models (LLMs). The models are based on the GPT-3 decoder-only architecture and are pretrained on a mixture of Arabic and English texts, including source code in various programming languages. With 13 billion parameters, they demonstrate better knowledge and reasoning capabilities in Arabic than any existing open Arabic and multilingual models by a sizable margin, based on extensive evaluation. Moreover, the models are competitive in English compared to English-centric open models of similar size, despite being trained on much less English data. We provide a detailed description of the training, the tuning, the safety alignment, and the evaluation of the models. We release two open versions of the model -- the foundation Jais model, and an instruction-tuned Jais-chat variant -- with the aim of promoting research on Arabic LLMs. Available at https://huggingface.co/inception-mbzuai/jais-13b-chat",
+     "token_count": 259
+    }
+   ]
+  },
+  {
+   "arxiv_id": "2310.00034",
+   "title": "PB-LLM: Partially Binarized Large Language Models",
+   "abstract": "This paper explores network binarization, a radical form of quantization, compressing model weights to a single bit, specifically for Large Language Models (LLMs) compression. Due to previous binarization methods collapsing LLMs, we propose a novel approach, Partially-Binarized LLM (PB-LLM), which can achieve extreme low-bit quantization while maintaining the linguistic reasoning capacity of quantized LLMs. Specifically, our exploration first uncovers the ineffectiveness of naive applications of existing binarization algorithms and highlights the imperative role of salient weights in achieving low-bit quantization. Thus, PB-LLM filters a small ratio of salient weights during binarization, allocating them to higher-bit storage, i.e., partially-binarization. PB-LLM is extended to recover the capacities of quantized LMMs, by analyzing from the perspective of post-training quantization (PTQ) and quantization-aware training (QAT). Under PTQ, combining the concepts from GPTQ, we reconstruct the binarized weight matrix guided by the Hessian matrix and successfully recover the reasoning capacity of PB-LLM in low-bit. Under QAT, we freeze the salient weights during training, explore the derivation of optimal scaling factors crucial for minimizing the quantization error, and propose a scaling mechanism based on this derived scaling strategy for residual binarized weights. Those explorations and the developed methodologies significantly contribute to rejuvenating the performance of low-bit quantized LLMs and present substantial advancements in the field of network binarization for LLMs.The code is available at https://github.com/hahnyuan/BinaryLLM.",
+   "authors": [
+    "Yuzhang Shang",
+    "Zhihang Yuan",
+    "Qiang Wu",
+    "Zhen Dong"
+   ],
+   "published": "2023-09-29T14:35:27",
+   "primary_category": "cs.LG",
+   "categories": [
+    "cs.LG",
+    "cs.AI",
+    "cs.CL"
+   ],
+   "venue": null,
+   "cited_by_count": null,
+   "cited_at": null,
+   "referenced_works_count": null,
+   "is_open_access": null,
+   "oa_status": null,
+   "pdf_url": "https://arxiv.org/pdf/2310.00034v2",
+   "html_url": "https://arxiv.org/html/2310.00034",
+   "has_code": null,
+   "chunks": [
+    {
+     "chunk_index": 0,
+     "section": "abstract",
+     "chunk_type": "text",
+     "source": "abstract",
+     "text": "This paper explores network binarization, a radical form of quantization, compressing model weights to a single bit, specifically for Large Language Models (LLMs) compression. Due to previous binarization methods collapsing LLMs, we propose a novel approach, Partially-Binarized LLM (PB-LLM), which can achieve extreme low-bit quantization while maintaining the linguistic reasoning capacity of quantized LLMs. Specifically, our exploration first uncovers the ineffectiveness of naive applications of existing binarization algorithms and highlights the imperative role of salient weights in achieving low-bit quantization. Thus, PB-LLM filters a small ratio of salient weights during binarization, allocating them to higher-bit storage, i.e., partially-binarization. PB-LLM is extended to recover the capacities of quantized LMMs, by analyzing from the perspective of post-training quantization (PTQ) and quantization-aware training (QAT). Under PTQ, combining the concepts from GPTQ, we reconstruct the binarized weight matrix guided by the Hessian matrix and successfully recover the reasoning capacity of PB-LLM in low-bit. Under QAT, we freeze the salient weights during training, explore the derivation of optimal scaling factors crucial for minimizing the quantization error, and propose a scaling mechanism based on this derived scaling strategy for residual binarized weights. Those explorations and the developed methodologies significantly contribute to rejuvenating the performance of low-bit quantized LLMs and present substantial advancements in the field of network binarization for LLMs.The code is available at https://github.com/hahnyuan/BinaryLLM.",
+     "token_count": 416
+    }
+   ]
+  },
+  {
+   "arxiv_id": "2311.01825",
+   "title": "Large Language Models to the Rescue: Reducing the Complexity in Scientific Workflow Development Using ChatGPT",
+   "abstract": "Scientific workflow systems are increasingly popular for expressing and executing complex data analysis pipelines over large datasets, as they offer reproducibility, dependability, and scalability of analyses by automatic parallelization on large compute clusters. However, implementing workflows is difficult due to the involvement of many black-box tools and the deep infrastructure stack necessary for their execution. Simultaneously, user-supporting tools are rare, and the number of available examples is much lower than in classical programming languages. To address these challenges, we investigate the efficiency of Large Language Models (LLMs), specifically ChatGPT, to support users when dealing with scientific workflows. We performed three user studies in two scientific domains to evaluate ChatGPT for comprehending, adapting, and extending workflows. Our results indicate that LLMs efficiently interpret workflows but achieve lower performance for exchanging components or purposeful workflow extensions. We characterize their limitations in these challenging scenarios and suggest future research directions.",
+   "authors": [
+    "Mario Sänger",
+    "Ninon De Mecquenem",
+    "Katarzyna Ewa Lewińska",
+    "Vasilis Bountris",
+    "Fabian Lehmann",
+    "Ulf Leser",
+    "Thomas Kosch"
+   ],
+   "published": "2023-11-03T10:28:53",
+   "primary_category": "cs.DC",
+   "categories": [
+    "cs.DC",
+    "cs.CL",
+    "cs.HC"
+   ],
+   "venue": null,
+   "cited_by_count": null,
+   "cited_at": null,
+   "referenced_works_count": null,
+   "is_open_access": null,
+   "oa_status": null,
+   "pdf_url": "https://arxiv.org/pdf/2311.01825v2",
+   "html_url": "https://arxiv.org/html/2311.01825",
+   "has_code": null,
+   "chunks": [
+    {
+     "chunk_index": 0,
+     "section": "abstract",
+     "chunk_type": "text",
+     "source": "abstract",
+     "text": "Scientific workflow systems are increasingly popular for expressing and executing complex data analysis pipelines over large datasets, as they offer reproducibility, dependability, and scalability of analyses by automatic parallelization on large compute clusters. However, implementing workflows is difficult due to the involvement of many black-box tools and the deep infrastructure stack necessary for their execution. Simultaneously, user-supporting tools are rare, and the number of available examples is much lower than in classical programming languages. To address these challenges, we investigate the efficiency of Large Language Models (LLMs), specifically ChatGPT, to support users when dealing with scientific workflows. We performed three user studies in two scientific domains to evaluate ChatGPT for comprehending, adapting, and extending workflows. Our results indicate that LLMs efficiently interpret workflows but achieve lower performance for exchanging components or purposeful workflow extensions. We characterize their limitations in these challenging scenarios and suggest future research directions.",
+     "token_count": 280
+    }
+   ]
+  },
+  {
+   "arxiv_id": "2312.10793",
+   "title": "Demystifying Instruction Mixing for Fine-tuning Large Language Models",
+   "abstract": "Instruction tuning significantly enhances the performance of large language models (LLMs) across various tasks. However, the procedure to optimizing the mixing of instruction datasets for LLM fine-tuning is still poorly understood. This study categorizes instructions into three primary types: NLP downstream tasks, coding, and general chat. We explore the effects of instruction tuning on different combinations of datasets on LLM performance, and find that certain instruction types are more advantageous for specific applications but can negatively impact other areas. This work provides insights into instruction mixtures, laying the foundations for future research.",
+   "authors": [
+    "Renxi Wang",
+    "Haonan Li",
+    "Minghao Wu",
+    "Yuxia Wang",
+    "Xudong Han",
+    "Chiyu Zhang",
+    "Timothy Baldwin"
+   ],
+   "published": "2023-12-17T18:44:26",
+   "primary_category": "cs.CL",
+   "categories": [
+    "cs.CL",
+    "cs.AI"
+   ],
+   "venue": null,
+   "cited_by_count": null,
+   "cited_at": null,
+   "referenced_works_count": null,
+   "is_open_access": null,
+   "oa_status": null,
+   "pdf_url": "https://arxiv.org/pdf/2312.10793v3",
+   "html_url": "https://arxiv.org/html/2312.10793",
+   "has_code": null,
+   "chunks": [
+    {
+     "chunk_index": 0,
+     "section": "abstract",
+     "chunk_type": "text",
+     "source": "abstract",
+     "text": "Instruction tuning significantly enhances the performance of large language models (LLMs) across various tasks. However, the procedure to optimizing the mixing of instruction datasets for LLM fine-tuning is still poorly understood. This study categorizes instructions into three primary types: NLP downstream tasks, coding, and general chat. We explore the effects of instruction tuning on different combinations of datasets on LLM performance, and find that certain instruction types are more advantageous for specific applications but can negatively impact other areas. This work provides insights into instruction mixtures, laying the foundations for future research.",
+     "token_count": 167
+    }
+   ]
+  },
+  {
+   "arxiv_id": "2401.10034",
+   "title": "Evolutionary Computation in the Era of Large Language Model: Survey and Roadmap",
+   "abstract": "Large language models (LLMs) have not only revolutionized natural language processing but also extended their prowess to various domains, marking a significant stride towards artificial general intelligence. The interplay between LLMs and evolutionary algorithms (EAs), despite differing in objectives and methodologies, share a common pursuit of applicability in complex problems. Meanwhile, EA can provide an optimization framework for LLM's further enhancement under black-box settings, empowering LLM with flexible global search capacities. On the other hand, the abundant domain knowledge inherent in LLMs could enable EA to conduct more intelligent searches. Furthermore, the text processing and generative capabilities of LLMs would aid in deploying EAs across a wide range of tasks. Based on these complementary advantages, this paper provides a thorough review and a forward-looking roadmap, categorizing the reciprocal inspiration into two main avenues: LLM-enhanced EA and EA-enhanced LLM. Some integrated synergy methods are further introduced to exemplify the complementarity between LLMs and EAs in diverse scenarios, including code generation, software engineering, neural architecture search, and various generation tasks. As the first comprehensive review focused on the EA research in the era of LLMs, this paper provides a foundational stepping stone for understanding the collaborative potential of LLMs and EAs. The identified challenges and future directions offer guidance for researchers and practitioners to unlock the full potential of this innovative collaboration in propelling advancements in optimization and artificial intelligence. We have created a GitHub repository to index the relevant papers: https://github.com/wuxingyu-ai/LLM4EC.",
+   "authors": [
+    "Xingyu Wu",
+    "Sheng-hao Wu",
+    "Jibin Wu",
+    "Liang Feng",
+    "Kay Chen Tan"
+   ],
+   "published": "2024-01-18T14:58:17",
+   "primary_category": "cs.NE",
+   "categories": [
+    "cs.NE",
+    "cs.AI",
+    "cs.CL"
+   ],
+   "venue": null,
+   "cited_by_count": null,
+   "cited_at": null,
+   "referenced_works_count": null,
+   "is_open_access": null,
+   "oa_status": null,
+   "pdf_url": "https://arxiv.org/pdf/2401.10034v3",
+   "html_url": "https://arxiv.org/html/2401.10034",
+   "has_code": null,
+   "chunks": [
+    {
+     "chunk_index": 0,
+     "section": "abstract",
+     "chunk_type": "text",
+     "source": "abstract",
+     "text": "Large language models (LLMs) have not only revolutionized natural language processing but also extended their prowess to various domains, marking a significant stride towards artificial general intelligence. The interplay between LLMs and evolutionary algorithms (EAs), despite differing in objectives and methodologies, share a common pursuit of applicability in complex problems. Meanwhile, EA can provide an optimization framework for LLM's further enhancement under black-box settings, empowering LLM with flexible global search capacities. On the other hand, the abundant domain knowledge inherent in LLMs could enable EA to conduct more intelligent searches. Furthermore, the text processing and generative capabilities of LLMs would aid in deploying EAs across a wide range of tasks. Based on these complementary advantages, this paper provides a thorough review and a forward-looking roadmap, categorizing the reciprocal inspiration into two main avenues: LLM-enhanced EA and EA-enhanced LLM. Some integrated synergy methods are further introduced to exemplify the complementarity between LLMs and EAs in diverse scenarios, including code generation, software engineering, neural architecture search, and various generation tasks. As the first comprehensive review focused on the EA research in the era of LLMs, this paper provides a foundational stepping stone for understanding the collaborative potential of LLMs and EAs. The identified challenges and future directions offer guidance for researchers and practitioners to unlock the full potential of this innovative collaboration in propelling advancements in optimization and artificial intelligence. We have created a GitHub repository to index the relevant papers: https://github.com/wuxingyu-ai/LLM4EC.",
+     "token_count": 442
+    }
+   ]
+  },
+  {
+   "arxiv_id": "2402.11651",
+   "title": "Learning From Failure: Integrating Negative Examples when Fine-tuning Large Language Models as Agents",
+   "abstract": "Large language models (LLMs) have achieved success in acting as agents, which interact with environments through tools such as search engines. However, LLMs are optimized for language generation instead of tool use during training or alignment, limiting their effectiveness as agents. To resolve this problem, previous work has first collected interaction trajectories between LLMs and environments, using only trajectories that successfully finished the task to fine-tune smaller models, making fine-tuning data scarce and acquiring it both difficult and costly. Discarding failed trajectories also leads to significant wastage of data and resources and limits the possible optimization paths during fine-tuning. In this paper, we argue that unsuccessful trajectories offer valuable insights, and LLMs can learn from these trajectories through appropriate quality control and fine-tuning strategies. By simply adding a prefix or suffix that tells the model whether to generate a successful trajectory during training, we improve model performance by a large margin on mathematical reasoning, multi-hop question answering, and strategic question answering tasks. We further analyze the inference results and find that our method provides a better trade-off between valuable information and errors in unsuccessful trajectories. To our knowledge, we are the first to demonstrate the value of negative trajectories and their application in agent-tunning scenarios. Our findings offer guidance for developing better agent-tuning methods and low-resource data usage techniques.",
+   "authors": [
+    "Renxi Wang",
+    "Haonan Li",
+    "Xudong Han",
+    "Yixuan Zhang",
+    "Timothy Baldwin"
+   ],
+   "published": "2024-02-18T17:10:07",
+   "primary_category": "cs.CL",
+   "categories": [
+    "cs.CL"
+   ],
+   "venue": null,
+   "cited_by_count": null,
+   "cited_at": null,
+   "referenced_works_count": null,
+   "is_open_access": null,
+   "oa_status": null,
+   "pdf_url": "https://arxiv.org/pdf/2402.11651v2",
+   "html_url": "https://arxiv.org/html/2402.11651",
+   "has_code": null,
+   "chunks": [
+    {
+     "chunk_index": 0,
+     "section": "abstract",
+     "chunk_type": "text",
+     "source": "abstract",
+     "text": "Large language models (LLMs) have achieved success in acting as agents, which interact with environments through tools such as search engines. However, LLMs are optimized for language generation instead of tool use during training or alignment, limiting their effectiveness as agents. To resolve this problem, previous work has first collected interaction trajectories between LLMs and environments, using only trajectories that successfully finished the task to fine-tune smaller models, making fine-tuning data scarce and acquiring it both difficult and costly. Discarding failed trajectories also leads to significant wastage of data and resources and limits the possible optimization paths during fine-tuning. In this paper, we argue that unsuccessful trajectories offer valuable insights, and LLMs can learn from these trajectories through appropriate quality control and fine-tuning strategies. By simply adding a prefix or suffix that tells the model whether to generate a successful trajectory during training, we improve model performance by a large margin on mathematical reasoning, multi-hop question answering, and strategic question answering tasks. We further analyze the inference results and find that our method provides a better trade-off between valuable information and errors in unsuccessful trajectories. To our knowledge, we are the first to demonstrate the value of negative trajectories and their application in agent-tunning scenarios. Our findings offer guidance for developing better agent-tuning methods and low-resource data usage techniques.",
+     "token_count": 393
+    }
+   ]
+  },
+  {
+   "arxiv_id": "2404.01023",
+   "title": "Large Language Model Evaluation Via Multi AI Agents: Preliminary results",
+   "abstract": "As Large Language Models (LLMs) have become integral to both research and daily operations, rigorous evaluation is crucial. This assessment is important not only for individual tasks but also for understanding their societal impact and potential risks. Despite extensive efforts to examine LLMs from various perspectives, there is a noticeable lack of multi-agent AI models specifically designed to evaluate the performance of different LLMs. To address this gap, we introduce a novel multi-agent AI model that aims to assess and compare the performance of various LLMs. Our model consists of eight distinct AI agents, each responsible for retrieving code based on a common description from different advanced language models, including GPT-3.5, GPT-3.5 Turbo, GPT-4, GPT-4 Turbo, Google Bard, LLAMA, and Hugging Face. Our developed model utilizes the API of each language model to retrieve code for a given high-level description. Additionally, we developed a verification agent, tasked with the critical role of evaluating the code generated by its counterparts. We integrate the HumanEval benchmark into our verification agent to assess the generated code's performance, providing insights into their respective capabilities and efficiencies. Our initial results indicate that the GPT-3.5 Turbo model's performance is comparatively better than the other models. This preliminary analysis serves as a benchmark, comparing their performances side by side. Our future goal is to enhance the evaluation process by incorporating the Massively Multitask Benchmark for Python (MBPP) benchmark, which is expected to further refine our assessment. Additionally, we plan to share our developed model with twenty practitioners from various backgrounds to test our model and collect their feedback for further improvement.",
+   "authors": [
+    "Zeeshan Rasheed",
+    "Muhammad Waseem",
+    "Kari Systä",
+    "Pekka Abrahamsson"
+   ],
+   "published": "2024-04-01T10:06:04",
+   "primary_category": "cs.SE",
+   "categories": [
+    "cs.SE"
+   ],
+   "venue": null,
+   "cited_by_count": null,
+   "cited_at": null,
+   "referenced_works_count": null,
+   "is_open_access": null,
+   "oa_status": null,
+   "pdf_url": "https://arxiv.org/pdf/2404.01023v1",
+   "html_url": "https://arxiv.org/html/2404.01023",
+   "has_code": null,
+   "chunks": [
+    {
+     "chunk_index": 0,
+     "section": "abstract",
+     "chunk_type": "text",
+     "source": "abstract",
+     "text": "As Large Language Models (LLMs) have become integral to both research and daily operations, rigorous evaluation is crucial. This assessment is important not only for individual tasks but also for understanding their societal impact and potential risks. Despite extensive efforts to examine LLMs from various perspectives, there is a noticeable lack of multi-agent AI models specifically designed to evaluate the performance of different LLMs. To address this gap, we introduce a novel multi-agent AI model that aims to assess and compare the performance of various LLMs. Our model consists of eight distinct AI agents, each responsible for retrieving code based on a common description from different advanced language models, including GPT-3.5, GPT-3.5 Turbo, GPT-4, GPT-4 Turbo, Google Bard, LLAMA, and Hugging Face. Our developed model utilizes the API of each language model to retrieve code for a given high-level description. Additionally, we developed a verification agent, tasked with the critical role of evaluating the code generated by its counterparts. We integrate the HumanEval benchmark into our verification agent to assess the generated code's performance, providing insights into their respective capabilities and efficiencies. Our initial results indicate that the GPT-3.5 Turbo model's performance is comparatively better than the other models. This preliminary analysis serves as a benchmark, comparing their performances side by side. Our future goal is to enhance the evaluation process by incorporating the Massively Multitask Benchmark for Python (MBPP) benchmark, which is expected to further refine our assessment. Additionally, we plan to share our developed model with twenty practitioners from various backgrounds to test our model and collect their feedback for further improvement.",
+     "token_count": 453
+    }
+   ]
+  },
+  {
+   "arxiv_id": "2405.19266",
+   "title": "PediatricsGPT: Large Language Models as Chinese Medical Assistants for Pediatric Applications",
+   "abstract": "Developing intelligent pediatric consultation systems offers promising prospects for improving diagnostic efficiency, especially in China, where healthcare resources are scarce. Despite recent advances in Large Language Models (LLMs) for Chinese medicine, their performance is sub-optimal in pediatric applications due to inadequate instruction data and vulnerable training procedures. To address the above issues, this paper builds PedCorpus, a high-quality dataset of over 300,000 multi-task instructions from pediatric textbooks, guidelines, and knowledge graph resources to fulfil diverse diagnostic demands. Upon well-designed PedCorpus, we propose PediatricsGPT, the first Chinese pediatric LLM assistant built on a systematic and robust training pipeline. In the continuous pre-training phase, we introduce a hybrid instruction pre-training mechanism to mitigate the internal-injected knowledge inconsistency of LLMs for medical domain adaptation. Immediately, the full-parameter Supervised Fine-Tuning (SFT) is utilized to incorporate the general medical knowledge schema into the models. After that, we devise a direct following preference optimization to enhance the generation of pediatrician-like humanistic responses. In the parameter-efficient secondary SFT phase, a mixture of universal-specific experts strategy is presented to resolve the competency conflict between medical generalist and pediatric expertise mastery. Extensive results based on the metrics, GPT-4, and doctor evaluations on distinct doctor downstream tasks show that PediatricsGPT consistently outperforms previous Chinese medical LLMs. Our model and dataset will be open-source for community development.",
+   "authors": [
+    "Dingkang Yang",
+    "Jinjie Wei",
+    "Dongling Xiao",
+    "Shunli Wang",
+    "Tong Wu",
+    "Gang Li",
+    "Mingcheng Li",
+    "Shuaibing Wang",
+    "Jiawei Chen",
+    "Yue Jiang",
+    "Qingyao Xu",
+    "Ke Li",
+    "Peng Zhai",
+    "Lihua Zhang"
+   ],
+   "published": "2024-05-29T16:59:38",
+   "primary_category": "cs.CL",
+   "categories": [
+    "cs.CL"
+   ],
+   "venue": null,
+   "cited_by_count": null,
+   "cited_at": null,
+   "referenced_works_count": null,
+   "is_open_access": null,
+   "oa_status": null,
+   "pdf_url": "https://arxiv.org/pdf/2405.19266v4",
+   "html_url": "https://arxiv.org/html/2405.19266",
+   "has_code": null,
+   "chunks": [
+    {
+     "chunk_index": 0,
+     "section": "abstract",
+     "chunk_type": "text",
+     "source": "abstract",
+     "text": "Developing intelligent pediatric consultation systems offers promising prospects for improving diagnostic efficiency, especially in China, where healthcare resources are scarce. Despite recent advances in Large Language Models (LLMs) for Chinese medicine, their performance is sub-optimal in pediatric applications due to inadequate instruction data and vulnerable training procedures. To address the above issues, this paper builds PedCorpus, a high-quality dataset of over 300,000 multi-task instructions from pediatric textbooks, guidelines, and knowledge graph resources to fulfil diverse diagnostic demands. Upon well-designed PedCorpus, we propose PediatricsGPT, the first Chinese pediatric LLM assistant built on a systematic and robust training pipeline. In the continuous pre-training phase, we introduce a hybrid instruction pre-training mechanism to mitigate the internal-injected knowledge inconsistency of LLMs for medical domain adaptation. Immediately, the full-parameter Supervised Fine-Tuning (SFT) is utilized to incorporate the general medical knowledge schema into the models. After that, we devise a direct following preference optimization to enhance the generation of pediatrician-like humanistic responses. In the parameter-efficient secondary SFT phase, a mixture of universal-specific experts strategy is presented to resolve the competency conflict between medical generalist and pediatric expertise mastery. Extensive results based on the metrics, GPT-4, and doctor evaluations on distinct doctor downstream tasks show that PediatricsGPT consistently outperforms previous Chinese medical LLMs. Our model and dataset will be open-source for community development.",
+     "token_count": 422
+    }
+   ]
+  },
+  {
+   "arxiv_id": "2407.12036",
+   "title": "Exploring Advanced Large Language Models with LLMsuite",
+   "abstract": "This tutorial explores the advancements and challenges in the development of Large Language Models (LLMs) such as ChatGPT and Gemini. It addresses inherent limitations like temporal knowledge cutoffs, mathematical inaccuracies, and the generation of incorrect information, proposing solutions like Retrieval Augmented Generation (RAG), Program-Aided Language Models (PAL), and frameworks such as ReAct and LangChain. The integration of these techniques enhances LLM performance and reliability, especially in multi-step reasoning and complex task execution. The paper also covers fine-tuning strategies, including instruction fine-tuning, parameter-efficient methods like LoRA, and Reinforcement Learning from Human Feedback (RLHF) as well as Reinforced Self-Training (ReST). Additionally, it provides a comprehensive survey of transformer architectures and training techniques for LLMs. The source code can be accessed by contacting the author via email for a request.",
+   "authors": [
+    "Giorgio Roffo"
+   ],
+   "published": "2024-07-01T05:37:17",
+   "primary_category": "cs.CL",
+   "categories": [
+    "cs.CL",
+    "cs.CV"
+   ],
+   "venue": null,
+   "cited_by_count": null,
+   "cited_at": null,
+   "referenced_works_count": null,
+   "is_open_access": null,
+   "oa_status": null,
+   "pdf_url": "https://arxiv.org/pdf/2407.12036v2",
+   "html_url": "https://arxiv.org/html/2407.12036",
+   "has_code": null,
+   "chunks": [
+    {
+     "chunk_index": 0,
+     "section": "abstract",
+     "chunk_type": "text",
+     "source": "abstract",
+     "text": "This tutorial explores the advancements and challenges in the development of Large Language Models (LLMs) such as ChatGPT and Gemini. It addresses inherent limitations like temporal knowledge cutoffs, mathematical inaccuracies, and the generation of incorrect information, proposing solutions like Retrieval Augmented Generation (RAG), Program-Aided Language Models (PAL), and frameworks such as ReAct and LangChain. The integration of these techniques enhances LLM performance and reliability, especially in multi-step reasoning and complex task execution. The paper also covers fine-tuning strategies, including instruction fine-tuning, parameter-efficient methods like LoRA, and Reinforcement Learning from Human Feedback (RLHF) as well as Reinforced Self-Training (ReST). Additionally, it provides a comprehensive survey of transformer architectures and training techniques for LLMs. The source code can be accessed by contacting the author via email for a request.",
+     "token_count": 242
+    }
+   ]
+  },
+  {
+   "arxiv_id": "2409.11272",
+   "title": "LOLA -- An Open-Source Massively Multilingual Large Language Model",
+   "abstract": "This paper presents LOLA, a massively multilingual large language model trained on more than 160 languages using a sparse Mixture-of-Experts Transformer architecture. Our architectural and implementation choices address the challenge of harnessing linguistic diversity while maintaining efficiency and avoiding the common pitfalls of multilinguality. Our analysis of the evaluation results shows competitive performance in natural language generation and understanding tasks. Additionally, we demonstrate how the learned expert-routing mechanism exploits implicit phylogenetic linguistic patterns to potentially alleviate the curse of multilinguality. We provide an in-depth look at the training process, an analysis of the datasets, and a balanced exploration of the model's strengths and limitations. As an open-source model, LOLA promotes reproducibility and serves as a robust foundation for future research. Our findings enable the development of compute-efficient multilingual models with strong, scalable performance across languages.",
+   "authors": [
+    "Nikit Srivastava",
+    "Denis Kuchelev",
+    "Tatiana Moteu Ngoli",
+    "Kshitij Shetty",
+    "Michael Röder",
+    "Hamada Zahera",
+    "Diego Moussallem",
+    "Axel-Cyrille Ngonga Ngomo"
+   ],
+   "published": "2024-09-17T15:23:08",
+   "primary_category": "cs.CL",
+   "categories": [
+    "cs.CL",
+    "cs.AI",
+    "cs.LG"
+   ],
+   "venue": null,
+   "cited_by_count": null,
+   "cited_at": null,
+   "referenced_works_count": null,
+   "is_open_access": null,
+   "oa_status": null,
+   "pdf_url": "https://arxiv.org/pdf/2409.11272v7",
+   "html_url": "https://arxiv.org/html/2409.11272",
+   "has_code": null,
+   "chunks": [
+    {
+     "chunk_index": 0,
+     "section": "abstract",
+     "chunk_type": "text",
+     "source": "abstract",
+     "text": "This paper presents LOLA, a massively multilingual large language model trained on more than 160 languages using a sparse Mixture-of-Experts Transformer architecture. Our architectural and implementation choices address the challenge of harnessing linguistic diversity while maintaining efficiency and avoiding the common pitfalls of multilinguality. Our analysis of the evaluation results shows competitive performance in natural language generation and understanding tasks. Additionally, we demonstrate how the learned expert-routing mechanism exploits implicit phylogenetic linguistic patterns to potentially alleviate the curse of multilinguality. We provide an in-depth look at the training process, an analysis of the datasets, and a balanced exploration of the model's strengths and limitations. As an open-source model, LOLA promotes reproducibility and serves as a robust foundation for future research. Our findings enable the development of compute-efficient multilingual models with strong, scalable performance across languages.",
+     "token_count": 260
+    }
+   ]
+  },
+  {
+   "arxiv_id": "2411.16133",
+   "title": "Context Awareness Gate For Retrieval Augmented Generation",
+   "abstract": "Retrieval Augmented Generation (RAG) has emerged as a widely adopted approach to mitigate the limitations of large language models (LLMs) in answering domain-specific questions. Previous research has predominantly focused on improving the accuracy and quality of retrieved data chunks to enhance the overall performance of the generation pipeline. However, despite ongoing advancements, the critical issue of retrieving irrelevant information -- which can impair the ability of the model to utilize its internal knowledge effectively -- has received minimal attention. In this work, we investigate the impact of retrieving irrelevant information in open-domain question answering, highlighting its significant detrimental effect on the quality of LLM outputs. To address this challenge, we propose the Context Awareness Gate (CAG) architecture, a novel mechanism that dynamically adjusts the LLMs' input prompt based on whether the user query necessitates external context retrieval. Additionally, we introduce the Vector Candidates method, a core mathematical component of CAG that is statistical, LLM-independent, and highly scalable. We further examine the distributions of relationships between contexts and questions, presenting a statistical analysis of these distributions. This analysis can be leveraged to enhance the context retrieval process in Retrieval Augmented Generation (RAG) systems.",
+   "authors": [
+    "Mohammad Hassan Heydari",
+    "Arshia Hemmat",
+    "Erfan Naman",
+    "Afsaneh Fatemi"
+   ],
+   "published": "2024-11-25T06:48:38",
+   "primary_category": "cs.LG",
+   "categories": [
+    "cs.LG",
+    "cs.IR"
+   ],
+   "venue": null,
+   "cited_by_count": null,
+   "cited_at": null,
+   "referenced_works_count": null,
+   "is_open_access": null,
+   "oa_status": null,
+   "pdf_url": "https://arxiv.org/pdf/2411.16133v2",
+   "html_url": "https://arxiv.org/html/2411.16133",
+   "has_code": null,
+   "chunks": [
+    {
+     "chunk_index": 0,
+     "section": "abstract",
+     "chunk_type": "text",
+     "source": "abstract",
+     "text": "Retrieval Augmented Generation (RAG) has emerged as a widely adopted approach to mitigate the limitations of large language models (LLMs) in answering domain-specific questions. Previous research has predominantly focused on improving the accuracy and quality of retrieved data chunks to enhance the overall performance of the generation pipeline. However, despite ongoing advancements, the critical issue of retrieving irrelevant information -- which can impair the ability of the model to utilize its internal knowledge effectively -- has received minimal attention. In this work, we investigate the impact of retrieving irrelevant information in open-domain question answering, highlighting its significant detrimental effect on the quality of LLM outputs. To address this challenge, we propose the Context Awareness Gate (CAG) architecture, a novel mechanism that dynamically adjusts the LLMs' input prompt based on whether the user query necessitates external context retrieval. Additionally, we introduce the Vector Candidates method, a core mathematical component of CAG that is statistical, LLM-independent, and highly scalable. We further examine the distributions of relationships between contexts and questions, presenting a statistical analysis of these distributions. This analysis can be leveraged to enhance the context retrieval process in Retrieval Augmented Generation (RAG) systems.",
+     "token_count": 350
+    }
+   ]
+  },
+  {
+   "arxiv_id": "2411.18583",
+   "title": "Automated Literature Review Using NLP Techniques and LLM-Based Retrieval-Augmented Generation",
+   "abstract": "This research presents and compares multiple approaches to automate the generation of literature reviews using several Natural Language Processing (NLP) techniques and retrieval-augmented generation (RAG) with a Large Language Model (LLM). The ever-increasing number of research articles provides a huge challenge for manual literature review. It has resulted in an increased demand for automation. Developing a system capable of automatically generating the literature reviews from only the PDF files as input is the primary objective of this research work. The effectiveness of several Natural Language Processing (NLP) strategies, such as the frequency-based method (spaCy), the transformer model (Simple T5), and retrieval-augmented generation (RAG) with Large Language Model (GPT-3.5-turbo), is evaluated to meet the primary objective. The SciTLDR dataset is chosen for this research experiment and three distinct techniques are utilized to implement three different systems for auto-generating the literature reviews. The ROUGE scores are used for the evaluation of all three systems. Based on the evaluation, the Large Language Model GPT-3.5-turbo achieved the highest ROUGE-1 score, 0.364. The transformer model comes in second place and spaCy is at the last position. Finally, a graphical user interface is created for the best system based on the large language model.",
+   "authors": [
+    "Nurshat Fateh Ali",
+    "Md. Mahdi Mohtasim",
+    "Shakil Mosharrof",
+    "T. Gopi Krishna"
+   ],
+   "published": "2024-11-27T18:27:07",
+   "primary_category": "cs.CL",
+   "categories": [
+    "cs.CL",
+    "cs.AI",
+    "cs.IR",
+    "cs.LG"
+   ],
+   "venue": null,
+   "cited_by_count": 13,
+   "cited_at": "2026-10-12",
+   "referenced_works_count": null,
+   "is_open_access": null,
+   "oa_status": null,
+   "pdf_url": "https://arxiv.org/pdf/2411.18583v1",
+   "html_url": "https://arxiv.org/html/2411.18583",
+   "has_code": null,
+   "chunks": [
+    {
+     "chunk_index": 0,
+     "section": "abstract",
+     "chunk_type": "text",
+     "source": "abstract",
+     "text": "This research presents and compares multiple approaches to automate the generation of literature reviews using several Natural Language Processing (NLP) techniques and retrieval-augmented generation (RAG) with a Large Language Model (LLM). The ever-increasing number of research articles provides a huge challenge for manual literature review. It has resulted in an increased demand for automation. Developing a system capable of automatically generating the literature reviews from only the PDF files as input is the primary objective of this research work. The effectiveness of several Natural Language Processing (NLP) strategies, such as the frequency-based method (spaCy), the transformer model (Simple T5), and retrieval-augmented generation (RAG) with Large Language Model (GPT-3.5-turbo), is evaluated to meet the primary objective. The SciTLDR dataset is chosen for this research experiment and three distinct techniques are utilized to implement three different systems for auto-generating the literature reviews. The ROUGE scores are used for the evaluation of all three systems. Based on the evaluation, the Large Language Model GPT-3.5-turbo achieved the highest ROUGE-1 score, 0.364. The transformer model comes in second place and spaCy is at the last position. Finally, a graphical user interface is created for the best system based on the large language model.",
+     "token_count": 344
+    }
+   ]
+  },
+  {
+   "arxiv_id": "2412.05838",
+   "title": "A Collaborative Multi-Agent Approach to Retrieval-Augmented Generation Across Diverse Data",
+   "abstract": "Retrieval-Augmented Generation (RAG) enhances Large Language Models (LLMs) by incorporating external, domain-specific data into the generative process. While LLMs are highly capable, they often rely on static, pre-trained datasets, limiting their ability to integrate dynamic or private data. Traditional RAG systems typically use a single-agent architecture to handle query generation, data retrieval, and response synthesis. However, this approach becomes inefficient when dealing with diverse data sources, such as relational databases, document stores, and graph databases, often leading to performance bottlenecks and reduced accuracy. This paper proposes a multi-agent RAG system to address these limitations. Specialized agents, each optimized for a specific data source, handle query generation for relational, NoSQL, and document-based systems. These agents collaborate within a modular framework, with query execution delegated to an environment designed for compatibility across various database types. This distributed approach enhances query efficiency, reduces token overhead, and improves response accuracy by ensuring that each agent focuses on its specialized task. The proposed system is scalable and adaptable, making it ideal for generative AI workflows that require integration with diverse, dynamic, or private data sources. By leveraging specialized agents and a modular execution environment, the system provides an efficient and robust solution for handling complex, heterogeneous data environments in generative AI applications.",
+   "authors": [
+    "Aniruddha Salve",
+    "Saba Attar",
+    "Mahesh Deshmukh",
+    "Sayali Shivpuje",
+    "Arnab Mitra Utsab"
+   ],
+   "published": "2024-12-08T07:18:19",
+   "primary_category": "cs.AI",
+   "categories": [
+    "cs.AI"
+   ],
+   "venue": null,
+   "cited_by_count": null,
+   "cited_at": null,
+   "referenced_works_count": null,
+   "is_open_access": null,
+   "oa_status": null,
+   "pdf_url": "https://arxiv.org/pdf/2412.05838v1",
+   "html_url": "https://arxiv.org/html/2412.05838",
+   "has_code": null,
+   "chunks": [
+    {
+     "chunk_index": 0,
+     "section": "abstract",
+     "chunk_type": "text",
+     "source": "abstract",
+     "text": "Retrieval-Augmented Generation (RAG) enhances Large Language Models (LLMs) by incorporating external, domain-specific data into the generative process. While LLMs are highly capable, they often rely on static, pre-trained datasets, limiting their ability to integrate dynamic or private data. Traditional RAG systems typically use a single-agent architecture to handle query generation, data retrieval, and response synthesis. However, this approach becomes inefficient when dealing with diverse data sources, such as relational databases, document stores, and graph databases, often leading to performance bottlenecks and reduced accuracy. This paper proposes a multi-agent RAG system to address these limitations. Specialized agents, each optimized for a specific data source, handle query generation for relational, NoSQL, and document-based systems. These agents collaborate within a modular framework, with query execution delegated to an environment designed for compatibility across various database types. This distributed approach enhances query efficiency, reduces token overhead, and improves response accuracy by ensuring that each agent focuses on its specialized task. The proposed system is scalable and adaptable, making it ideal for generative AI workflows that require integration with diverse, dynamic, or private data sources. By leveraging specialized agents and a modular execution environment, the system provides an efficient and robust solution for handling complex, heterogeneous data environments in generative AI applications.",
+     "token_count": 388
+    }
+   ]
+  },
+  {
+   "arxiv_id": "2502.00306",
+   "title": "Riddle Me This! Stealthy Membership Inference for Retrieval-Augmented Generation",
+   "abstract": "Retrieval-Augmented Generation (RAG) enables Large Language Models (LLMs) to generate grounded responses by leveraging external knowledge databases without altering model parameters. Although the absence of weight tuning prevents leakage via model parameters, it introduces the risk of inference adversaries exploiting retrieved documents in the model's context. Existing methods for membership inference and data extraction often rely on jailbreaking or carefully crafted unnatural queries, which can be easily detected or thwarted with query rewriting techniques common in RAG systems. In this work, we present Interrogation Attack (IA), a membership inference technique targeting documents in the RAG datastore. By crafting natural-text queries that are answerable only with the target document's presence, our approach demonstrates successful inference with just 30 queries while remaining stealthy; straightforward detectors identify adversarial prompts from existing methods up to ~76x more frequently than those generated by our attack. We observe a 2x improvement in TPR@1%FPR over prior inference attacks across diverse RAG configurations, all while costing less than $0.02 per document inference.",
+   "authors": [
+    "Ali Naseh",
+    "Yuefeng Peng",
+    "Anshuman Suri",
+    "Harsh Chaudhari",
+    "Alina Oprea",
+    "Amir Houmansadr"
+   ],
+   "published": "2025-02-01T04:01:18",
+   "primary_category": "cs.CR",
+   "categories": [
+    "cs.CR",
+    "cs.AI",
+    "cs.CL",
+    "cs.IR",
+    "cs.LG"
+   ],
+   "venue": "CCS 2025",
+   "cited_by_count": 3,
+   "cited_at": "2026-10-12",
+   "referenced_works_count": null,
+   "is_open_access": null,
+   "oa_status": null,
+   "pdf_url": "https://arxiv.org/pdf/2502.00306v2",
+   "html_url": "https://arxiv.org/html/2502.00306",
+   "has_code": null,
+   "chunks": [
+    {
+     "chunk_index": 0,
+     "section": "abstract",
+     "chunk_type": "text",
+     "source": "abstract",
+     "text": "Retrieval-Augmented Generation (RAG) enables Large Language Models (LLMs) to generate grounded responses by leveraging external knowledge databases without altering model parameters. Although the absence of weight tuning prevents leakage via model parameters, it introduces the risk of inference adversaries exploiting retrieved documents in the model's context. Existing methods for membership inference and data extraction often rely on jailbreaking or carefully crafted unnatural queries, which can be easily detected or thwarted with query rewriting techniques common in RAG systems. In this work, we present Interrogation Attack (IA), a membership inference technique targeting documents in the RAG datastore. By crafting natural-text queries that are answerable only with the target document's presence, our approach demonstrates successful inference with just 30 queries while remaining stealthy; straightforward detectors identify adversarial prompts from existing methods up to ~76x more frequently than those generated by our attack. We observe a 2x improvement in TPR@1%FPR over prior inference attacks across diverse RAG configurations, all while costing less than $0.02 per document inference.",
+     "token_count": 301
+    }
+   ]
+  },
+  {
+   "arxiv_id": "2502.01113",
+   "title": "GFM-RAG: Graph Foundation Model for Retrieval Augmented Generation",
+   "abstract": "Retrieval-augmented generation (RAG) has proven effective in integrating knowledge into large language models (LLMs). However, conventional RAGs struggle to capture complex relationships between pieces of knowledge, limiting their performance in intricate reasoning that requires integrating knowledge from multiple sources. Recently, graph-enhanced retrieval augmented generation (GraphRAG) builds graph structure to explicitly model these relationships, enabling more effective and efficient retrievers. Nevertheless, its performance is still hindered by the noise and incompleteness within the graph structure. To address this, we introduce GFM-RAG, a novel graph foundation model (GFM) for retrieval augmented generation. GFM-RAG is powered by an innovative graph neural network that reasons over graph structure to capture complex query-knowledge relationships. The GFM with 8M parameters undergoes a two-stage training process on large-scale datasets, comprising 60 knowledge graphs with over 14M triples and 700k documents. This results in impressive performance and generalizability for GFM-RAG, making it the first graph foundation model applicable to unseen datasets for retrieval without any fine-tuning required. Extensive experiments on three multi-hop QA datasets and seven domain-specific RAG datasets demonstrate that GFM-RAG achieves state-of-the-art performance while maintaining efficiency and alignment with neural scaling laws, highlighting its potential for further improvement.",
+   "authors": [
+    "Linhao Luo",
+    "Zicheng Zhao",
+    "Gholamreza Haffari",
+    "Dinh Phung",
+    "Chen Gong",
+    "Shirui Pan"
+   ],
+   "published": "2025-02-03T07:04:29",
+   "primary_category": "cs.IR",
+   "categories": [
+    "cs.IR",
+    "cs.AI",
+    "cs.CL"
+   ],
+   "venue": null,
+   "cited_by_count": null,
+   "cited_at": null,
+   "referenced_works_count": null,
+   "is_open_access": null,
+   "oa_status": null,
+   "pdf_url": "https://arxiv.org/pdf/2502.01113v3",
+   "html_url": "https://arxiv.org/html/2502.01113",
+   "has_code": null,
+   "chunks": [
+    {
+     "chunk_index": 0,
+     "section": "abstract",
+     "chunk_type": "text",
+     "source": "abstract",
+     "text": "Retrieval-augmented generation (RAG) has proven effective in integrating knowledge into large language models (LLMs). However, conventional RAGs struggle to capture complex relationships between pieces of knowledge, limiting their performance in intricate reasoning that requires integrating knowledge from multiple sources. Recently, graph-enhanced retrieval augmented generation (GraphRAG) builds graph structure to explicitly model these relationships, enabling more effective and efficient retrievers. Nevertheless, its performance is still hindered by the noise and incompleteness within the graph structure. To address this, we introduce GFM-RAG, a novel graph foundation model (GFM) for retrieval augmented generation. GFM-RAG is powered by an innovative graph neural network that reasons over graph structure to capture complex query-knowledge relationships. The GFM with 8M parameters undergoes a two-stage training process on large-scale datasets, comprising 60 knowledge graphs with over 14M triples and 700k documents. This results in impressive performance and generalizability for GFM-RAG, making it the first graph foundation model applicable to unseen datasets for retrieval without any fine-tuning required. Extensive experiments on three multi-hop QA datasets and seven domain-specific RAG datasets demonstrate that GFM-RAG achieves state-of-the-art performance while maintaining efficiency and alignment with neural scaling laws, highlighting its potential for further improvement.",
+     "token_count": 375
+    }
+   ]
+  },
+  {
+   "arxiv_id": "2503.16581",
+   "title": "Investigating Retrieval-Augmented Generation in Quranic Studies: A Study of 13 Open-Source Large Language Models",
+   "abstract": "Accurate and contextually faithful responses are critical when applying large language models (LLMs) to sensitive and domain-specific tasks, such as answering queries related to quranic studies. General-purpose LLMs often struggle with hallucinations, where generated responses deviate from authoritative sources, raising concerns about their reliability in religious contexts. This challenge highlights the need for systems that can integrate domain-specific knowledge while maintaining response accuracy, relevance, and faithfulness. In this study, we investigate 13 open-source LLMs categorized into large (e.g., Llama3:70b, Gemma2:27b, QwQ:32b), medium (e.g., Gemma2:9b, Llama3:8b), and small (e.g., Llama3.2:3b, Phi3:3.8b). A Retrieval-Augmented Generation (RAG) is used to make up for the problems that come with using separate models. This research utilizes a descriptive dataset of Quranic surahs including the meanings, historical context, and qualities of the 114 surahs, allowing the model to gather relevant knowledge before responding. The models are evaluated using three key metrics set by human evaluators: context relevance, answer faithfulness, and answer relevance. The findings reveal that large models consistently outperform smaller models in capturing query semantics and producing accurate, contextually grounded responses. The Llama3.2:3b model, even though it is considered small, does very well on faithfulness (4.619) and relevance (4.857), showing the promise of smaller architectures that have been well optimized. This article examines the trade-offs between model size, computational efficiency, and response quality while using LLMs in domain-specific applications.",
+   "authors": [
+    "Zahra Khalila",
+    "Arbi Haza Nasution",
+    "Winda Monika",
+    "Aytug Onan",
+    "Yohei Murakami",
+    "Yasir Bin Ismail Radi",
+    "Noor Mohammad Osmani"
+   ],
+   "published": "2025-03-20T13:26:30",
+   "primary_category": "cs.CL",
+   "categories": [
+    "cs.CL",
+    "cs.AI",
+    "cs.LG"
+   ],
+   "venue": null,
+   "cited_by_count": 14,
+   "cited_at": "2026-10-12",
+   "referenced_works_count": null,
+   "is_open_access": null,
+   "oa_status": null,
+   "pdf_url": "https://arxiv.org/pdf/2503.16581v1",
+   "html_url": "https://arxiv.org/html/2503.16581",
+   "has_code": null,
+   "chunks": [
+    {
+     "chunk_index": 0,
+     "section": "abstract",
+     "chunk_type": "text",
+     "source": "abstract",
+     "text": "Accurate and contextually faithful responses are critical when applying large language models (LLMs) to sensitive and domain-specific tasks, such as answering queries related to quranic studies. General-purpose LLMs often struggle with hallucinations, where generated responses deviate from authoritative sources, raising concerns about their reliability in religious contexts. This challenge highlights the need for systems that can integrate domain-specific knowledge while maintaining response accuracy, relevance, and faithfulness. In this study, we investigate 13 open-source LLMs categorized into large (e.g., Llama3:70b, Gemma2:27b, QwQ:32b), medium (e.g., Gemma2:9b, Llama3:8b), and small (e.g., Llama3.2:3b, Phi3:3.8b). A Retrieval-Augmented Generation (RAG) is used to make up for the problems that come with using separate models. This research utilizes a descriptive dataset of Quranic surahs including the meanings, historical context, and qualities of the 114 surahs, allowing the model to gather relevant knowledge before responding. The models are evaluated using three key metrics set by human evaluators: context relevance, answer faithfulness, and answer relevance. The findings reveal that large models consistently outperform smaller models in capturing query semantics and producing accurate, contextually grounded responses. The Llama3.2:3b model, even though it is considered small, does very well on faithfulness (4.619) and relevance (4.857), showing the promise of smaller architectures that have been well optimized. This article examines the trade-offs between model size, computational efficiency, and response quality while using LLMs in domain-specific applications.",
+     "token_count": 424
+    }
+   ]
+  },
+  {
+   "arxiv_id": "2509.01030",
+   "title": "Identifying Origins of Place Names via Retrieval Augmented Generation",
+   "abstract": "Who is the \"Batman\" behind \"Batman Street\" in Melbourne? Understanding the historical, cultural, and societal narratives behind place names can reveal the rich context that has shaped a community. Although place names serve as essential spatial references in gazetteers, they often lack information about place name origins. Enriching these place names in today's gazetteers is a time-consuming, manual process that requires extensive exploration of a vast archive of documents and text sources. Recent advances in natural language processing and language models (LMs) hold the promise of significant automation of identifying place name origins due to their powerful capability to exploit the semantics of the stored documents. This chapter presents a retrieval augmented generation pipeline designed to search for place name origins over a broad knowledge base, DBpedia. Given a spatial query, our approach first extracts sub-graphs that may contain knowledge relevant to the query; then ranks the extracted sub-graphs to generate the final answer to the query using fine-tuned LM-based models (i.e., ColBERTv2 and Llama2). Our results highlight the key challenges facing automated retrieval of place name origins, especially the tendency of language models to under-use the spatial information contained in texts as a discriminating factor. Our approach also frames the wider implications for geographic information retrieval using retrieval augmented generation.",
+   "authors": [
+    "Alexis Horde-Vo",
+    "Matt Duckham",
+    "Estrid He",
+    "Rafe Benli"
+   ],
+   "published": "2025-08-31T23:40:53",
+   "primary_category": "cs.IR",
+   "categories": [
+    "cs.IR"
+   ],
+   "venue": null,
+   "cited_by_count": null,
+   "cited_at": null,
+   "referenced_works_count": null,
+   "is_open_access": null,
+   "oa_status": null,
+   "pdf_url": "https://arxiv.org/pdf/2509.01030v2",
+   "html_url": "https://arxiv.org/html/2509.01030",
+   "has_code": null,
+   "chunks": [
+    {
+     "chunk_index": 0,
+     "section": "abstract",
+     "chunk_type": "text",
+     "source": "abstract",
+     "text": "Who is the \"Batman\" behind \"Batman Street\" in Melbourne? Understanding the historical, cultural, and societal narratives behind place names can reveal the rich context that has shaped a community. Although place names serve as essential spatial references in gazetteers, they often lack information about place name origins. Enriching these place names in today's gazetteers is a time-consuming, manual process that requires extensive exploration of a vast archive of documents and text sources. Recent advances in natural language processing and language models (LMs) hold the promise of significant automation of identifying place name origins due to their powerful capability to exploit the semantics of the stored documents. This chapter presents a retrieval augmented generation pipeline designed to search for place name origins over a broad knowledge base, DBpedia. Given a spatial query, our approach first extracts sub-graphs that may contain knowledge relevant to the query; then ranks the extracted sub-graphs to generate the final answer to the query using fine-tuned LM-based models (i.e., ColBERTv2 and Llama2). Our results highlight the key challenges facing automated retrieval of place name origins, especially the tendency of language models to under-use the spatial information contained in texts as a discriminating factor. Our approach also frames the wider implications for geographic information retrieval using retrieval augmented generation.",
+     "token_count": 366
+    }
+   ]
+  },
+  {
+   "arxiv_id": "2510.22344",
+   "title": "FAIR-RAG: Faithful Adaptive Iterative Refinement for Retrieval-Augmented Generation",
+   "abstract": "While Retrieval-Augmented Generation (RAG) mitigates hallucination and knowledge staleness in Large Language Models (LLMs), existing frameworks often falter on complex, multi-hop queries that require synthesizing information from disparate sources. Current advanced RAG methods, employing iterative or adaptive strategies, lack a robust mechanism to systematically identify and fill evidence gaps, often propagating noise or failing to gather a comprehensive context. We introduce FAIR-RAG, a novel agentic framework that transforms the standard RAG pipeline into a dynamic, evidence-driven reasoning process. At its core is an Iterative Refinement Cycle governed by a module we term Structured Evidence Assessment (SEA). The SEA acts as an analytical gating mechanism: it deconstructs the initial query into a checklist of required findings and audits the aggregated evidence to identify confirmed facts and, critically, explicit informational gaps. These gaps provide a precise signal to an Adaptive Query Refinement agent, which generates new, targeted sub-queries to retrieve missing information. This cycle repeats until the evidence is verified as sufficient, ensuring a comprehensive context for a final, strictly faithful generation. We conducted experiments on challenging multi-hop QA benchmarks, including HotpotQA, 2WikiMultiHopQA, and MusiQue. In a unified experimental setup, FAIR-RAG significantly outperforms strong baselines. On HotpotQA, it achieves an F1-score of 0.453 -- an absolute improvement of 8.3 points over the strongest iterative baseline -- establishing a new state-of-the-art for this class of methods on these benchmarks. Our work demonstrates that a structured, evidence-driven refinement process with explicit gap analysis is crucial for unlocking reliable and accurate reasoning in advanced RAG systems for complex, knowledge-intensive tasks.",
+   "authors": [
+    "Mohammad Aghajani Asl",
+    "Majid Asgari-Bidhendi",
+    "Behrooz Minaei-Bidgoli"
+   ],
+   "published": "2025-10-25T15:59:33",
+   "primary_category": "cs.CL",
+   "categories": [
+    "cs.CL",
+    "cs.AI",
+    "cs.IR"
+   ],
+   "venue": null,
+   "cited_by_count": null,
+   "cited_at": null,
+   "referenced_works_count": null,
+   "is_open_access": null,
+   "oa_status": null,
+   "pdf_url": "https://arxiv.org/pdf/2510.22344v1",
+   "html_url": "https://arxiv.org/html/2510.22344",
+   "has_code": null,
+   "chunks": [
+    {
+     "chunk_index": 0,
+     "section": "abstract",
+     "chunk_type": "text",
+     "source": "abstract",
+     "text": "While Retrieval-Augmented Generation (RAG) mitigates hallucination and knowledge staleness in Large Language Models (LLMs), existing frameworks often falter on complex, multi-hop queries that require synthesizing information from disparate sources. Current advanced RAG methods, employing iterative or adaptive strategies, lack a robust mechanism to systematically identify and fill evidence gaps, often propagating noise or failing to gather a comprehensive context. We introduce FAIR-RAG, a novel agentic framework that transforms the standard RAG pipeline into a dynamic, evidence-driven reasoning process. At its core is an Iterative Refinement Cycle governed by a module we term Structured Evidence Assessment (SEA). The SEA acts as an analytical gating mechanism: it deconstructs the initial query into a checklist of required findings and audits the aggregated evidence to identify confirmed facts and, critically, explicit informational gaps. These gaps provide a precise signal to an Adaptive Query Refinement agent, which generates new, targeted sub-queries to retrieve missing information. This cycle repeats until the evidence is verified as sufficient, ensuring a comprehensive context for a final, strictly faithful generation. We conducted experiments on challenging multi-hop QA benchmarks, including HotpotQA, 2WikiMultiHopQA, and MusiQue. In a unified experimental setup, FAIR-RAG significantly outperforms strong baselines. On HotpotQA, it achieves an F1-score of 0.453 -- an absolute improvement of 8.3 points over the strongest iterative baseline -- establishing a new state-of-the-art for this class of methods on these benchmarks. Our work demonstrates that a structured, evidence-driven refinement process with explicit gap analysis is crucial for unlocking reliable and accurate reasoning in advanced RAG systems for complex, knowledge-intensive tasks.",
+     "token_count": 469
+    }
+   ]
+  },
+  {
+   "arxiv_id": "2601.05264",
+   "title": "Engineering the RAG Stack: A Comprehensive Review of the Architecture and Trust Frameworks for Retrieval-Augmented Generation Systems",
+   "abstract": "This article provides a comprehensive systematic literature review of academic studies, industrial applications, and real-world deployments from 2018 to 2025, providing a practical guide and detailed overview of modern Retrieval-Augmented Generation (RAG) architectures. RAG offers a modular approach for integrating external knowledge without increasing the capacity of the model as LLM systems expand. Research and engineering practices have been fragmented as a result of the increasing diversity of RAG methodologies, which encompasses a variety of fusion mechanisms, retrieval strategies, and orchestration approaches. We provide quantitative assessment frameworks, analyze the implications for trust and alignment, and systematically consolidate existing RAG techniques into a unified taxonomy. This document is a practical framework for the deployment of resilient, secure, and domain-adaptable RAG systems, synthesizing insights from academic literature, industry reports, and technical implementation guides. It also functions as a technical reference.",
+   "authors": [
+    "Dean Wampler",
+    "Dave Nielson",
+    "Alireza Seddighi"
+   ],
+   "published": "2025-11-07T16:26:29",
+   "primary_category": "cs.IR",
+   "categories": [
+    "cs.IR",
+    "cs.AI"
+   ],
+   "venue": null,
+   "cited_by_count": 0,
+   "cited_at": "2026-10-12",
+   "referenced_works_count": null,
+   "is_open_access": null,
+   "oa_status": null,
+   "pdf_url": "https://arxiv.org/pdf/2601.05264v1",
+   "html_url": "https://arxiv.org/html/2601.05264",
+   "has_code": null,
+   "chunks": [
+    {
+     "chunk_index": 0,
+     "section": "abstract",
+     "chunk_type": "text",
+     "source": "abstract",
+     "text": "This article provides a comprehensive systematic literature review of academic studies, industrial applications, and real-world deployments from 2018 to 2025, providing a practical guide and detailed overview of modern Retrieval-Augmented Generation (RAG) architectures. RAG offers a modular approach for integrating external knowledge without increasing the capacity of the model as LLM systems expand. Research and engineering practices have been fragmented as a result of the increasing diversity of RAG methodologies, which encompasses a variety of fusion mechanisms, retrieval strategies, and orchestration approaches. We provide quantitative assessment frameworks, analyze the implications for trust and alignment, and systematically consolidate existing RAG techniques into a unified taxonomy. This document is a practical framework for the deployment of resilient, secure, and domain-adaptable RAG systems, synthesizing insights from academic literature, industry reports, and technical implementation guides. It also functions as a technical reference.",
+     "token_count": 265
+    }
+   ]
+  },
+  {
+   "arxiv_id": "2603.09891",
+   "title": "Overview of the TREC 2025 Retrieval Augmented Generation (RAG) Track",
+   "abstract": "The second edition of the TREC Retrieval Augmented Generation (RAG) Track advances research on systems that integrate retrieval and generation to address complex, real-world information needs. Building on the foundation of the inaugural 2024 track, this year's challenge introduces long, multi-sentence narrative queries to better reflect the deep search task with the growing demand for reasoning-driven responses. Participants are tasked with designing pipelines that combine retrieval and generation while ensuring transparency and factual grounding. The track leverages the MS MARCO V2.1 corpus and employs a multi-layered evaluation framework encompassing relevance assessment, response completeness, attribution verification, and agreement analysis. By emphasizing multi-faceted narratives and attribution-rich answers from over 150 submissions this year, the TREC 2025 RAG Track aims to foster innovation in creating trustworthy, context-aware systems for retrieval augmented generation.",
+   "authors": [
+    "Shivani Upadhyay",
+    "Nandan Thakur",
+    "Ronak Pradeep",
+    "Nick Craswell",
+    "Daniel Campos",
+    "Jimmy Lin"
+   ],
+   "published": "2026-03-10T16:49:18",
+   "primary_category": "cs.IR",
+   "categories": [
+    "cs.IR"
+   ],
+   "venue": null,
+   "cited_by_count": null,
+   "cited_at": null,
+   "referenced_works_count": null,
+   "is_open_access": null,
+   "oa_status": null,
+   "pdf_url": "https://arxiv.org/pdf/2603.09891v1",
+   "html_url": "https://arxiv.org/html/2603.09891",
+   "has_code": null,
+   "chunks": [
+    {
+     "chunk_index": 0,
+     "section": "abstract",
+     "chunk_type": "text",
+     "source": "abstract",
+     "text": "The second edition of the TREC Retrieval Augmented Generation (RAG) Track advances research on systems that integrate retrieval and generation to address complex, real-world information needs. Building on the foundation of the inaugural 2024 track, this year's challenge introduces long, multi-sentence narrative queries to better reflect the deep search task with the growing demand for reasoning-driven responses. Participants are tasked with designing pipelines that combine retrieval and generation while ensuring transparency and factual grounding. The track leverages the MS MARCO V2.1 corpus and employs a multi-layered evaluation framework encompassing relevance assessment, response completeness, attribution verification, and agreement analysis. By emphasizing multi-faceted narratives and attribution-rich answers from over 150 submissions this year, the TREC 2025 RAG Track aims to foster innovation in creating trustworthy, context-aware systems for retrieval augmented generation.",
+     "token_count": 248
+    }
+   ]
+  },
+  {
+   "arxiv_id": "2604.19899",
+   "title": "A Reproducibility Study of Metacognitive Retrieval-Augmented Generation",
+   "abstract": "Recently, Retrieval Augmented Generation (RAG) has shifted focus to multi-retrieval approaches to tackle complex tasks such as multi-hop question answering. However, these systems struggle to decide when to stop searching once enough information has been gathered. To address this, \\citet{zhou2024metacognitive} introduced Metacognitive Retrieval Augmented Generation (MetaRAG), a framework inspired by metacognition that enables Large Language Models to critique and refine their reasoning. In this reproducibility paper, we reproduce MetaRAG following its original experimental setup and extend it in two directions: (i) by evaluating the effect of PointWise and ListWise rerankers, and (ii) by comparing with SIM-RAG, which employs a lightweight critic model to stop retrieval. Our results confirm MetaRAG's relative improvements over standard RAG and reasoning-based baselines, but also reveal lower absolute scores than reported, reflecting challenges with closed-source LLM updates, missing implementation details, and unreleased prompts. We show that MetaRAG is partially reproduced, gains substantially from reranking, and is more robust than SIM-RAG when extended with additional retrieval features.",
+   "authors": [
+    "Gabriel Iturra-Bocaz",
+    "Petra Galuscakova"
+   ],
+   "published": "2026-04-21T18:22:15",
+   "primary_category": "cs.IR",
+   "categories": [
+    "cs.IR"
+   ],
+   "venue": "ACM SIGIR Conference 2026",
+   "cited_by_count": null,
+   "cited_at": null,
+   "referenced_works_count": null,
+   "is_open_access": null,
+   "oa_status": null,
+   "pdf_url": "https://arxiv.org/pdf/2604.19899v1",
+   "html_url": "https://arxiv.org/html/2604.19899",
+   "has_code": null,
+   "chunks": [
+    {
+     "chunk_index": 0,
+     "section": "abstract",
+     "chunk_type": "text",
+     "source": "abstract",
+     "text": "Recently, Retrieval Augmented Generation (RAG) has shifted focus to multi-retrieval approaches to tackle complex tasks such as multi-hop question answering. However, these systems struggle to decide when to stop searching once enough information has been gathered. To address this, \\citet{zhou2024metacognitive} introduced Metacognitive Retrieval Augmented Generation (MetaRAG), a framework inspired by metacognition that enables Large Language Models to critique and refine their reasoning. In this reproducibility paper, we reproduce MetaRAG following its original experimental setup and extend it in two directions: (i) by evaluating the effect of PointWise and ListWise rerankers, and (ii) by comparing with SIM-RAG, which employs a lightweight critic model to stop retrieval. Our results confirm MetaRAG's relative improvements over standard RAG and reasoning-based baselines, but also reveal lower absolute scores than reported, reflecting challenges with closed-source LLM updates, missing implementation details, and unreleased prompts. We show that MetaRAG is partially reproduced, gains substantially from reranking, and is more robust than SIM-RAG when extended with additional retrieval features.",
+     "token_count": 302
+    }
+   ]
+  },
+  {
+   "arxiv_id": "2607.01852",
+   "title": "Evaluating Chunking Strategies for Retrieval-Augmented Generation on Academic Texts",
+   "abstract": "Retrieval-Augmented Generation (RAG) systems use the question-answering capabilities of Large Language Models (LLMs) to access information outside their parameters. We evaluate if cluster-based semantic chunking improves retrieval and answer quality compared to fixed-size and recursive chunking evaluating on long, structured academic theses using the Retrieval Augmented Generation Assessment (RAGAs) framework. RAGAs based faithfulness shows limited reliability in this setup. Performance on fixed versus document specific questions varied substantially, likely related to the formatting of documents and preprocessing. Under the tested configuration, cluster-based chunking did not outperform simpler strategies.",
+   "authors": [
+    "Valentin J. J. Kreileder",
+    "Johannes Reisinger",
+    "Andreas Fischer"
+   ],
+   "published": "2026-07-02T08:12:35",
+   "primary_category": "cs.IR",
+   "categories": [
+    "cs.IR",
+    "cs.AI",
+    "cs.CL"
+   ],
+   "venue": null,
+   "cited_by_count": null,
+   "cited_at": null,
+   "referenced_works_count": null,
+   "is_open_access": null,
+   "oa_status": null,
+   "pdf_url": "https://arxiv.org/pdf/2607.01852v1",
+   "html_url": "https://arxiv.org/html/2607.01852",
+   "has_code": null,
+   "chunks": [
+    {
+     "chunk_index": 0,
+     "section": "abstract",
+     "chunk_type": "text",
+     "source": "abstract",
+     "text": "Retrieval-Augmented Generation (RAG) systems use the question-answering capabilities of Large Language Models (LLMs) to access information outside their parameters. We evaluate if cluster-based semantic chunking improves retrieval and answer quality compared to fixed-size and recursive chunking evaluating on long, structured academic theses using the Retrieval Augmented Generation Assessment (RAGAs) framework. RAGAs based faithfulness shows limited reliability in this setup. Performance on fixed versus document specific questions varied substantially, likely related to the formatting of documents and preprocessing. Under the tested configuration, cluster-based chunking did not outperform simpler strategies.",
+     "token_count": 179
+    }
+   ]
+  },
+  {
+   "arxiv_id": "2609.16013",
+   "title": "Social Behavior Among Autonomous AI: How Large Language Models Interact in Dynamic Networks",
+   "abstract": "Cooperation is a cornerstone of human societies, enabling collective progress in dynamic and uncertain environments. With the advent of AI systems acting autonomously, it becomes crucial to understand not only human-AI cooperation but also AI-AI interactions in adaptive networks. In this work, we examine the interactions of AI using Large Language Models -- Mistral, Llama3, Gemma3, and Phi3 -- in a public goods game within dynamic network structures. Our experiments were conducted under single-model and mixed-model conditions across Watts-Strogatz (WS), Barabasi-Albert (BA), and Erdos-Renyi (ER) networks. We analyzed the impact of model architecture, network topology, and prompt design on cooperative behavior. Results show that Mistral and Llama3 offer high cooperation rates, while Phi3 shows defective tendencies. Additionally, the random structure of Erdos-Renyi networks dramatically improves cooperation. Prompt design also plays a key role; a society-benefits prompt leads to a higher cooperation level. These findings offer a preliminary framework for LLM-based simulations in adaptive social networks.",
+   "authors": [
+    "Narges Fardnia",
+    "Fatemeh Seyedin",
+    "Matthias Becker",
+    "Mahmoudreza Babaei",
+    "Adrian Weller"
+   ],
+   "published": "2026-08-25T06:50:03",
+   "primary_category": "cs.SI",
+   "categories": [
+    "cs.SI",
+    "cs.MA"
+   ],
+   "venue": "LLAIS 2025",
+   "cited_by_count": null,
+   "cited_at": null,
+   "referenced_works_count": null,
+   "is_open_access": null,
+   "oa_status": null,
+   "pdf_url": "https://arxiv.org/pdf/2609.16013v1",
+   "html_url": "https://arxiv.org/html/2609.16013",
+   "has_code": null,
+   "chunks": [
+    {
+     "chunk_index": 0,
+     "section": "abstract",
+     "chunk_type": "text",
+     "source": "abstract",
+     "text": "Cooperation is a cornerstone of human societies, enabling collective progress in dynamic and uncertain environments. With the advent of AI systems acting autonomously, it becomes crucial to understand not only human-AI cooperation but also AI-AI interactions in adaptive networks. In this work, we examine the interactions of AI using Large Language Models -- Mistral, Llama3, Gemma3, and Phi3 -- in a public goods game within dynamic network structures. Our experiments were conducted under single-model and mixed-model conditions across Watts-Strogatz (WS), Barabasi-Albert (BA), and Erdos-Renyi (ER) networks. We analyzed the impact of model architecture, network topology, and prompt design on cooperative behavior. Results show that Mistral and Llama3 offer high cooperation rates, while Phi3 shows defective tendencies. Additionally, the random structure of Erdos-Renyi networks dramatically improves cooperation. Prompt design also plays a key role; a society-benefits prompt leads to a higher cooperation level. These findings offer a preliminary framework for LLM-based simulations in adaptive social networks.",
+     "token_count": 279
+    }
+   ]
+  }
+ ]
+}

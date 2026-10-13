@@ -6,7 +6,10 @@
    架构 §12 原文："`citations` 表中 `verified = true` 的占比 …… 这条指标是**免费**的"。
    因为 Verifier 节点已把校验结果写回 `verified` 字段，所以它只是对数据库做一次计数，
    在**没有任何 API key、没有装 ragas** 的环境下也能给出真实数字。
-   它是本模块唯一能"立刻兑现"的指标，也是引用准确率双口径里的自动那一半。
+   ⚠️ 但自动口径的天花板是 Verifier 本身：`LLM_PROVIDER=mock` 下软校验按设计永远放行，
+   `verified` 会恒为 True —— 那是结构保证，不是证据。所以配套
+   **`manual_accuracy(csv_path)`（人工口径）**：读 `scripts/spotcheck_citations.py`
+   导出、人工填写的抽检 CSV，报告里两个口径**并列**（架构 §12 双口径要求）。
 
 2. **`build_ragas_dataset(run_id)`** —— 从 DB（或活的最终 state）组装
    `question / answer(draft) / contexts / ground_truth`。
@@ -129,6 +132,9 @@ class EvalReport:
     n_samples: int = 0
     n_with_ground_truth: int = 0
     citation_accuracy: dict[str, Any] | None = None
+    # ★ 人工口径（抽检）：架构 §12 要求与自动口径**并列汇报**。
+    # None = 没有已填写的抽检文件（`scripts/spotcheck_citations.py` 生成）。
+    manual_accuracy: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         """把"不产出假分数"从口头约定升级为**结构性不变量**。
@@ -154,6 +160,7 @@ class EvalReport:
             "n_samples": self.n_samples,
             "n_with_ground_truth": self.n_with_ground_truth,
             "citation_accuracy": self.citation_accuracy,
+            "manual_accuracy": self.manual_accuracy,
         }
 
 
@@ -260,6 +267,110 @@ async def citation_accuracy(run_id: str) -> dict[str, Any]:
         "verified": verified,
         "accuracy": (verified / total) if total else 0.0,
         "method": "auto",
+    }
+
+
+# --------------------------------------------------------------------------- 人工口径引用准确率
+# 抽检 CSV 的默认位置：与 scripts/spotcheck_citations.py 的 --out 默认值一致。
+# 报告端据此**自动**并列人工口径（文件不存在则跳过，不编造数字）。
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_SPOTCHECK_CSV = PROJECT_ROOT / "eval_results" / "citation_spotcheck.csv"
+
+# 人工判定列允许的取值（大小写/全半角宽松匹配在 _normalize_verdict 里做）。
+# ambiguous 计入分母但不计入分子：拿不准的引用不该被算成"名副其实"。
+_VERDICT_SUPPORTED = "supported"
+_VERDICT_UNSUPPORTED = "unsupported"
+_VERDICT_AMBIGUOUS = "ambiguous"
+
+
+def _normalize_verdict(raw: str | None) -> str | None:
+    """把人工填写的判定归一成 supported/unsupported/ambiguous；无法识别返回 None。
+
+    兼容常见的手填变体（yes/no、true/false、中文"是/否"），因为抽检大多在 Excel 里做，
+    不能指望填写者严格照抄枚举值 —— 但也不能把乱填当成"没填"默默丢弃，
+    调用方通过 `invalid` 计数能看到有多少条被判为不可识别。
+    """
+    v = (raw or "").strip().lower()
+    if not v:
+        return None
+    if v in {_VERDICT_SUPPORTED, "yes", "true", "1", "是", "支持", "名副其实"}:
+        return _VERDICT_SUPPORTED
+    if v in {_VERDICT_UNSUPPORTED, "no", "false", "0", "否", "不支持", "名不副实"}:
+        return _VERDICT_UNSUPPORTED
+    if v in {_VERDICT_AMBIGUOUS, "ambiguous", "unclear", "存疑", "待定"}:
+        return _VERDICT_AMBIGUOUS
+    return None
+
+
+def manual_accuracy(csv_path: Path | str | None = None) -> dict[str, Any]:
+    """**人工口径**引用准确率：读抽检 CSV 的 `human_verdict` 列做统计（架构 §12 双口径的人工那一半）。
+
+    为什么自动口径不够：`citations.verified` 是 Verifier（含 LLM 软校验）自己写回的，
+    mock/宽松模型下它**结构上恒为 True**（本机库里的 30 条全 True 就是这么来的）。
+    只报自动口径等于自己批改自己的作业。人工口径让人核对过的样本说话，
+    `agreement`（人工判定与自动 `verified` 的一致率）就是"Verifier 是否虚高放行"的校准值。
+
+    口径：
+    - `accuracy = supported / (supported + unsupported + ambiguous)`，
+      未判定行**不进分母**（把"没标"当"不合格"会系统性低估；当"合格"则是自欺）；
+    - `agreement` 只在已判定且 `auto_verified` 非空的行上计算，无可比行时为 `None`；
+    - `auto_accuracy` 用同一批已判定行的 `auto_verified` 列顺带复算，便于两口径**同分母对比**。
+
+    Args:
+        csv_path: 抽检 CSV（`scripts/spotcheck_citations.py` 导出、填好后回填的路径）。
+                  默认 `eval_results/citation_spotcheck.csv`。
+
+    Raises:
+        FileNotFoundError: 文件不存在（调用方据此区分"没抽过检"与"抽了但没判"）。
+    """
+    import csv
+
+    path = Path(csv_path) if csv_path is not None else DEFAULT_SPOTCHECK_CSV
+    if not path.exists():
+        raise FileNotFoundError(f"抽检文件不存在：{path}")
+
+    supported = unsupported = ambiguous = invalid = pending = 0
+    agree_rows = 0
+    agree = 0
+    auto_true = 0
+    with path.open(newline="", encoding="utf-8-sig") as fh:
+        for row in csv.DictReader(fh):
+            verdict = _normalize_verdict(row.get("human_verdict"))
+            if verdict is None:
+                if not (row.get("human_verdict") or "").strip():
+                    pending += 1
+                else:
+                    invalid += 1
+                continue
+            if verdict == _VERDICT_SUPPORTED:
+                supported += 1
+            elif verdict == _VERDICT_UNSUPPORTED:
+                unsupported += 1
+            else:
+                ambiguous += 1
+            # 一致率：人工判定 vs 自动 verified（空=未校验，不进分母）
+            auto_raw = (row.get("auto_verified") or "").strip().lower()
+            if auto_raw in {"true", "1", "yes"}:
+                auto_true += 1
+                agree_rows += 1
+                agree += 1 if verdict == _VERDICT_SUPPORTED else 0
+            elif auto_raw in {"false", "0", "no"}:
+                agree_rows += 1
+                agree += 1 if verdict == _VERDICT_UNSUPPORTED else 0
+
+    total_judged = supported + unsupported + ambiguous
+    return {
+        "total_judged": total_judged,
+        "supported": supported,
+        "unsupported": unsupported,
+        "ambiguous": ambiguous,
+        "pending": pending,
+        "invalid": invalid,
+        "accuracy": (supported / total_judged) if total_judged else 0.0,
+        "agreement": (agree / agree_rows) if agree_rows else None,
+        "auto_accuracy": (auto_true / total_judged) if total_judged else None,
+        "csv": str(path),
+        "method": "manual",
     }
 
 
@@ -561,6 +672,7 @@ async def run_ragas_eval(
     *,
     golden_path: Path | str | None = None,
     with_citation_accuracy: bool = True,
+    spotcheck_csv: Path | str | None = None,
 ) -> EvalReport:
     """对一批 run 跑 RAGAS 评测，返回结构化报告。
 
@@ -570,6 +682,8 @@ async def run_ragas_eval(
         metrics: 要算的指标名（见 `METRIC_NAMES`），默认全部五个。
         golden_path: golden 集路径，用于取 `ground_truth`。
         with_citation_accuracy: 是否附带自动口径引用准确率（它不依赖 LLM，几乎免费）。
+        spotcheck_csv: 人工抽检 CSV（`scripts/spotcheck_citations.py` 导出并填写）。
+                 存在且已填写时并列进 `report.manual_accuracy`；缺失则留 None（不编数字）。
 
     Returns:
         `EvalReport`。**任何一步不可用都返回 `available=False` 的报告，绝不抛异常、绝不填假分数。**
@@ -577,15 +691,16 @@ async def run_ragas_eval(
     requested = list(metrics) if metrics is not None else list(METRIC_NAMES)
     settings = get_settings()
     config = generation_config(settings)
+    manual = _manual_accuracy_if_present(spotcheck_csv)
 
     # ---- 降级①：没装 ragas ----
     # 放在最前面，因为它是"环境缺依赖"，与具体有哪些 run、配没配 key 无关。
     try:
         api = _load_ragas()
     except ImportError:
-        return _unavailable(_RAGAS_MISSING_REASON, generation_config=config)
+        return _with_manual(_unavailable(_RAGAS_MISSING_REASON, generation_config=config), manual)
     except Exception as exc:  # noqa: BLE001 - ragas 装了但坏掉时同样降级而非崩溃
-        return _unavailable(f"ragas 导入失败：{exc}", generation_config=config)
+        return _with_manual(_unavailable(f"ragas 导入失败：{exc}", generation_config=config), manual)
 
     # ---- 降级②：没有可用的裁判模型 ----
     # RAGAS 的指标全靠 LLM 生成/判定。mock 或未配 key 时算出的不是"分数"而是占位输出，
@@ -595,13 +710,17 @@ async def run_ragas_eval(
             "LLM_PROVIDER=mock：RAGAS 指标依赖 LLM 当裁判，mock 下无法产出可信分数，已跳过评测。"
             '如需真实评测，请配置 OPENAI_API_KEY（或改用真实 provider）后重跑。'
         )
-        return _unavailable(reason, generation_config=config, skipped_metrics=requested)
+        return _with_manual(
+            _unavailable(reason, generation_config=config, skipped_metrics=requested), manual
+        )
     if not settings.llm_configured:
         reason = (
             "未配置可用的 LLM（缺少 OPENAI_API_KEY / OPENAI_BASE_URL）："
             "RAGAS 无法在无裁判模型的情况下计算，已跳过评测。"
         )
-        return _unavailable(reason, generation_config=config, skipped_metrics=requested)
+        return _with_manual(
+            _unavailable(reason, generation_config=config, skipped_metrics=requested), manual
+        )
 
     # ---- 组装样本（不存在的 run 跳过）----
     all_run_ids = await _resolve_run_ids(run_ids)
@@ -614,10 +733,13 @@ async def run_ragas_eval(
 
     if not samples:
         requested_ids = ", ".join(all_run_ids) if all_run_ids else "（未指定）"
-        return _unavailable(
-            f"没有可评测的 run（run_id={requested_ids} 不存在或无可评测内容）",
-            generation_config=config,
-            run_ids=all_run_ids,
+        return _with_manual(
+            _unavailable(
+                f"没有可评测的 run（run_id={requested_ids} 不存在或无可评测内容）",
+                generation_config=config,
+                run_ids=all_run_ids,
+            ),
+            manual,
         )
 
     n_with_gt = sum(1 for s in samples if s.has_ground_truth)
@@ -645,6 +767,7 @@ async def run_ragas_eval(
         report.skipped_metrics = list(requested)
         if with_citation_accuracy:
             report.citation_accuracy = await _aggregate_citation_accuracy(samples)
+        report.manual_accuracy = manual
         return report
 
     # 只保留**真实算出来**的指标；某个指标若整批都没算出值，就归入 skipped 而不是填 0。
@@ -674,6 +797,27 @@ async def run_ragas_eval(
     )
     if with_citation_accuracy:
         report.citation_accuracy = await _aggregate_citation_accuracy(samples)
+    report.manual_accuracy = manual
+    return report
+
+
+def _manual_accuracy_if_present(csv_path: Path | str | None) -> dict[str, Any] | None:
+    """抽检文件存在且可解析时返回人工口径统计，否则返回 None。
+
+    为什么"没有文件"不是错误而是 None：人工抽检是周期性动作，
+    评测报告随时可能被重跑，没抽过检也得有自动口径 —— 但**绝不能因此造一个人工数**。
+    """
+    try:
+        stats = manual_accuracy(csv_path)
+    except FileNotFoundError:
+        return None
+    except Exception:  # noqa: BLE001 - CSV 坏了不该拖垮整份报告，跳过人工口径即可
+        return None
+    return stats if (stats["total_judged"] or stats["pending"]) else None
+
+
+def _with_manual(report: EvalReport, manual: dict[str, Any] | None) -> EvalReport:
+    report.manual_accuracy = manual
     return report
 
 
@@ -738,6 +882,7 @@ async def _aggregate_citation_accuracy(samples: list[RagasSample]) -> dict[str, 
 
 
 __all__ = [
+    "DEFAULT_SPOTCHECK_CSV",
     "EMBEDDING_METRICS",
     "METRIC_NAMES",
     "REFERENCE_METRICS",
@@ -747,5 +892,6 @@ __all__ = [
     "build_ragas_dataset",
     "citation_accuracy",
     "generation_config",
+    "manual_accuracy",
     "run_ragas_eval",
 ]

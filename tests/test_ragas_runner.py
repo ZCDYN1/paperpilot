@@ -500,3 +500,47 @@ def test_generation_config_records_comparability_fields():
     assert set(cfg) >= {"llm_provider", "llm_model", "temperature", "prompt_version", "ragas_version"}
     # prompt_version 是内容哈希（12 位十六进制）；取不到模板时为 unknown
     assert cfg["prompt_version"] == "unknown" or len(cfg["prompt_version"]) == 12
+
+
+# =========================================================================== 6. ★ 批量自动口径的分母/分子
+async def test_batched_citation_accuracy_excludes_unverified_from_numerator(scope, monkeypatch, tmp_path):
+    """整批评测面板上的引用准确率：`verified=None`（还没校验）**不计入分子**。
+
+    单条 run 的 `citation_accuracy()` 已经有用例，但 `run_ragas_eval` 走的是另一段实现
+    （`_aggregate_citation_accuracy`，吃的是样本里带出的 citations）。两处口径必须一致，
+    否则同一个数字在 CLI 与面板上会不一样。
+
+    写成 1 真 / 1 假 / 1 未校验：正确答案是 1/3。若哪天有人改成
+    `if c.get("verified") is not False`（把"没校验"当成"通过"），分子会变成 2、
+    面板直接虚高到 2/3 —— 而"引用准确率 ≥ 90%"这条验收就再也没人守得住了。
+    """
+    await _seed_run(
+        scope,
+        question="SciTLDR 用于什么任务？",
+        citations=[
+            {"claim": "c-true", "verified": True},
+            {"claim": "c-false", "verified": False},
+            {"claim": "c-pending", "verified": None},  # 尚未校验：不进分子
+        ],
+    )
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    get_settings.cache_clear()
+
+    from app.eval import ragas_runner
+
+    monkeypatch.setattr(ragas_runner, "_load_ragas", _fake_ragas_api)
+    monkeypatch.setattr(
+        ragas_runner,
+        "_evaluate_samples",
+        lambda api, samples, pairs, settings: [{"faithfulness": 1.0}],
+    )
+
+    report = await run_ragas_eval(run_ids=["r1"], golden_path=tmp_path / "missing.jsonl")
+
+    assert report.citation_accuracy == {
+        "total": 3,
+        "verified": 1,
+        "accuracy": pytest.approx(1 / 3),
+        "method": "auto",
+    }

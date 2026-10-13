@@ -117,10 +117,37 @@ def _print_health() -> None:
 
 
 # ------------------------------------------------------------------ 主流程
+def _seed_sample_corpus_if_new() -> None:
+    """全新 clone（还没有本地库）时，导入仓库自带的离线样例语料。
+
+    为什么放在启动器里：少了这一步，第一次提问就会去联网抓 arXiv ——
+    那需要合规的 User-Agent、几分钟限速等待，还要求网络可达 arXiv，
+    而"双击看看它能不能跑"的人这三样都没有。
+    已有本地库时 `load_sample_data.py` 自己会原样跳过，不会覆盖真实抓取的数据。
+    """
+    if (ROOT / "data" / "sqlite" / "paperpilot.db").exists():
+        return
+    print("  首次运行：导入离线样例语料（24 篇真实论文摘要，零联网）...")
+    subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "load_sample_data.py")],
+        cwd=str(ROOT),
+        check=False,
+    )
+    print()
+
+
 def main() -> int:
     os.chdir(ROOT)
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    # 本进程自己的输出流：中文 Windows 控制台默认 GBK，打印 ✓ 会直接抛 UnicodeEncodeError，
+    # 于是"其实已经成功"的启动反而以 traceback 收场。这里刻意不 import app.*，
+    # 免得依赖没装全时启动器本身崩掉、连"请先装依赖"的提示都发不出来。
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
 
     print("=" * 62)
     print("  PaperPilot 一键启动")
@@ -133,6 +160,8 @@ def main() -> int:
     if not (ROOT / "app" / "main.py").exists():
         print("[X] 当前目录下找不到 app/main.py，启动器位置不对。")
         return 1
+
+    _seed_sample_corpus_if_new()
 
     api_proc = ui_proc = None
 

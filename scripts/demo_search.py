@@ -22,6 +22,7 @@ import argparse
 import asyncio
 
 from app.core.config import get_settings
+from app.core.console import force_utf8_output
 from app.retrieval.hybrid_retriever import HybridRetriever, MetadataFilter
 
 
@@ -82,4 +83,5 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
+    force_utf8_output()
     raise SystemExit(asyncio.run(main()))

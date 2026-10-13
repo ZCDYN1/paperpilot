@@ -14,6 +14,7 @@ import sys
 
 from fastapi.testclient import TestClient
 
+from app.core.console import force_utf8_output
 from app.main import app
 
 
@@ -37,4 +38,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    force_utf8_output()
     sys.exit(main())

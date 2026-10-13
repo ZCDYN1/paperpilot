@@ -116,6 +116,10 @@ def consume_stream(url: str, payload: dict | None, timeline_box, report_box, met
 
                 elif event_type == "final_report":
                     st.session_state.report = data.get("markdown") or st.session_state.report
+                    # 引用链只在这一个事件里出现（`verify` 只发校验结论，不发逐条明细）。
+                    # 存下来才能在报告下方展示"哪些条目最终没通过校验"，
+                    # 而不是让用户只看到一个总分。
+                    st.session_state.citations = data.get("citations") or []
                     report_box.markdown(st.session_state.report)
 
                 elif event_type == "interrupted":
@@ -203,13 +207,15 @@ def _comparison_to_markdown(rows: list[dict]) -> str:
 # Streamlit 从任意目录启动时 CWD 都可能不同，用相对路径会读不到文件。
 EVAL_RESULTS_DIR = ROOT / "eval_results"
 
-# 报告展示的默认优先级：**真实数字优先**。
-# 之所以要排序而不是按文件名，是因为三份报告的 embedding 口径不同（local / api / mock），
-# 跨 embedding 的数字本就不可比；把 mock 那份放前面会让人误以为它是可信基线。
+# 报告展示的默认优先级：**可信口径优先**。
+# 消融报告的数字只有在**同轮、同索引、同 embedding** 下才可比，而 embedding/重排器口径就写在
+# 报告头部，所以排序表达的是"哪一份的口径更接近当前配置"，不是"哪一份更新"：
+# 真 BGE 交叉编码器那轮 > lexical 降级那轮 > 其它（未登记的文件按文件名排在后面）。
+# 名字不在这里的报告依然会出现在下拉里 —— 这里只排序，不筛选，避免新产物被静默藏起来。
 _PREFERRED_ABLATION_REPORTS: tuple[str, ...] = (
-    "ablation_local_bge.md",
-    "ablation_bge_m3.md",
-    "ablation.md",
+    "ablation_24papers_bge_rerank.md",
+    "ablation_24papers.md",
+    "ablation_latest.md",  # `make eval-ablation` 的默认产物，口径未登记，排在已保留的两份之后
 )
 
 
@@ -341,6 +347,19 @@ with tab_research:
             f" · score={v.get('score')} · 无支撑论断 {len(v.get('unsupported') or [])} 条"
         )
 
+    # ---- 引用明细 ----
+    # `verified` 由 verify 节点逐条写回：硬校验（引文逐字出现在定位到的 chunk 里）
+    # 与 LLM 软校验两层都过才置 True，这里只做计数、不做判定。
+    # ⚠️ 刻意不区分"精确命中"与"重锚救回"：两者在 state 里同形，救回条数只在后端日志
+    # `read.done`（reanchored / recovered_by）里 —— 面板没有这些数据，就不假装能显示。
+    citations = st.session_state.citations
+    if citations:
+        passed = sum(1 for c in citations if c.get("verified") is True)
+        st.caption(
+            f"引用 {len(citations)} 条 · 通过校验 {passed} · 未通过 {len(citations) - passed}"
+            "（口径：引文逐字命中 + LLM 软校验两层都过，含经重锚定位后通过的引用）"
+        )
+
     if st.session_state.report:
         st.divider()
         st.markdown("### 研究报告")
@@ -387,15 +406,19 @@ with tab_search:
     st.caption("不跑完整研究流程，直接试混合检索（向量 + BM25 → RRF → 重排）。")
 
 
-    @st.cache_resource(show_spinner=False)
+    @st.cache_resource(show_spinner=True)
     def get_retriever():
-        """强制 mock embedding：当前落盘索引就是 mock 建的，换真模型查询会落进
-        完全不同的语义空间、结果反而无意义。装了 `[local]` 并重建索引后可换成 `HybridRetriever()`。"""
-        from app.retrieval.embedder import MockEmbedder
-        from app.retrieval.hybrid_retriever import HybridRetriever
-        from app.retrieval.reranker import LexicalReranker
+        """按 `.env` 配置构造检索栈（本机当前是 `EMBEDDING_PROVIDER=local` 的 bge-m3）。
 
-        return HybridRetriever(embedder=MockEmbedder(dim=1024), reranker=LexicalReranker())
+        这里**不再强制 mock**：落盘索引就是 bge-m3 建的
+        （`data/faiss/paperpilot.manifest.json` 的 `embedding_identity`），
+        查询端必须用同一个 embedder —— 换一个模型就落进另一个语义空间，
+        而维度常常撞车（都是 1024），不报错、只是结果变差（静默退化）。
+        真实的一致性检查在调用处比对 `index_identity` 与 `embedder.identity`。
+        """
+        from app.retrieval.hybrid_retriever import HybridRetriever
+
+        return HybridRetriever()
 
 
     c1, c2 = st.columns([3, 1])
@@ -409,6 +432,12 @@ with tab_search:
     if go2:
         try:
             retriever = get_retriever()
+            if retriever.index_identity and retriever.index_identity != retriever.embedder.identity:
+                st.warning(
+                    f"索引由 `{retriever.index_identity}` 建立，当前查询端是 "
+                    f"`{retriever.embedder.identity}` —— 两者不在同一语义空间，"
+                    "向量路的结果不可信。请重建索引：`python scripts/build_index.py`"
+                )
             kws = [k.strip() for k in kw2.split(",") if k.strip()] or None
             hits = asyncio.run(retriever.search(q2, kws, rerank_top_n=n2))
             st.success(f"命中 {len(hits)} 篇（索引 {retriever.size} chunk）")
@@ -439,17 +468,29 @@ with tab_status:
     st.markdown(
         "- 抓取 arXiv → 章节级分块 → 落库（SQLite + WAL）\n"
         "- 混合检索：FAISS + BM25 → RRF 融合 → 交叉编码器重排 → chunk→paper 聚合\n"
-        "- LangGraph 多 Agent：拆解 → 语料保障 → 并行检索 → 抽取 → 引用校验 → 撰写\n"
+        "- 语义检索与重排都用**本地权重**：索引由 `models/bge-m3` 建立"
+        "（见 `data/faiss/paperpilot.manifest.json` 的 `embedding_identity`），"
+        "重排是 `bge-reranker-v2-m3`\n"
+        "- LangGraph 多 Agent：拆解 → 语料保障 → 并行检索 → 抽取 → 引用校验 → 对比表 → 撰写\n"
         "- SSE 流式（15 种事件）+ 两个 HITL 中断点\n"
         "- 引用可溯源：每条引用落在具体 chunk，带章节定位与证据强度\n"
-        "- 注入防护 / 重试超时熔断 / 短期+长期记忆"
+        "- 引用定位三条路径：精确命中 → 字段错位纠正 → 同篇逐字引文重锚；"
+        "每条都要求原文逐字对上才放行，全失败才判幻觉\n"
+        "- 结构化对比表：逐字段回原文校验，缺字段留空「—」，可导出 Markdown\n"
+        "- 长期记忆已接线：`plan` 召回并注入 prompt，`finalize` 写入方向/已读/偏好\n"
+        "- 短期记忆写入（`finalize` 追加本轮问答）\n"
+        "- Token **按节点**细分：面板与 `token_usage` 表都能看到每个节点的消耗\n"
+        "- 注入防护 / 重试超时熔断"
     )
     st.markdown("#### 待办")
     st.markdown(
-        "- 真实 BGE 语义检索（需 `pip install -e \".[local]\"` 后重建索引）\n"
-        "- 长期记忆的写入/召回在图中尚未完全接线\n"
-        "- Token 按节点细分统计（当前是整体一条）\n"
-        "- 对比表结构化抽取（产品定义里的核心产出物 A）"
+        "- 长期记忆只影响 `plan` 的 prompt：检索与精读阶段不消费已读清单"
+        "（`memory_context` 只在 `planner` 里产出并写进 state），"
+        "所以「避免重复精读同一批论文」还没落地\n"
+        "- 短期记忆**只写不读**：`load_context` 目前只被单测调用，没有节点把它读回 prompt，"
+        "因此「会话内追问」还不可用\n"
+        "- 引用重锚的统计只落在后端日志（`read.done` 的 `reanchored` / `recovered_by`），"
+        "既没进 SSE 事件也没进 `citations` 表，面板无法显示「本次救回了几条」"
     )
 
 # ====================================================================== 评测
@@ -535,6 +576,13 @@ with tab_eval:
         "这是**自动口径**；它不等于「人工抽检口径」—— 只报自动口径等于自己批改自己的作业，"
         "两个口径都要报。"
     )
+    # 分母是"落库的全部引用"，所以"经引用定位救回"的条目也一并计入分子 ——
+    # 它们与精确命中的引用在库里同形（`/{run_id}/citations` 不返回定位方式，
+    # 见 app/api/v1/research.py:291-321），面板因此**不宣称**能分辨两者，只把救回的条数指向日志。
+    st.caption(
+        "统计范围：包含经引用定位（字段错位纠正 / 同篇逐字引文重锚）后通过校验的引用；"
+        "救回条数只在后端日志 `read.done` 的 `reanchored` / `recovered_by` 里，接口未透出。"
+    )
     # 后端没有"列出所有 run"的接口，因此**不新增后端接口**，改为让用户手工填写 run_id。
     st.caption("提示：后端未提供 run 列表接口，请手工填写 run_id（可在「深度研究」页拿到）。")
     rid = st.text_input(
@@ -554,9 +602,14 @@ with tab_eval:
                     "—" if acc["accuracy"] is None else f"{acc['accuracy']:.1%}",
                 )
                 # 明确标注口径，避免"自动口径"被误当成权威结论。
+                # 口径细节必须写清分母：后端的 `verified_rate` 是 `sum(verified) / 全部引用条数`
+                # （app/api/v1/research.py 的 `/{run_id}/citations`），
+                # 所以"未校验（verified=None）"与"校验失败"都留在分母里、都不进分子。
+                # 把分母说成"已校验引用"会把两个完全不同的数混成一个。
                 st.caption(
-                    f"口径：**自动**（method={acc['method']}）—— 仅统计已校验引用，"
-                    "尚未校验（verified=None）不计入分子。"
+                    f"口径：**自动**（method={acc['method']}）—— 分母 = 本次落库的全部引用（"
+                    f"{acc['total']} 条），分子 = `verified is True` 的 {acc['verified']} 条；"
+                    "未校验（`verified=None`）与校验失败都计入分母、不计入分子。"
                 )
             except Exception as exc:  # noqa: BLE001
                 st.error(f"查询失败：{exc}")

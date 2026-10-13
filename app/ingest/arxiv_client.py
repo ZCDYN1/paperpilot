@@ -219,11 +219,38 @@ class ArxivClient:
         return feed
 
     async def _request_with_retry(self, params: dict) -> dict:
-        """`stop_after_attempt(3)` + 指数退避 + 随机抖动。
+        """`stop_after_attempt(3)` + 指数退避 + 随机抖动，**外面再套一层熔断**。
 
         抖动是必要的：若多个进程同时被限流，固定退避会让它们在同一个时刻
         一起重试，形成整齐的"重试风暴"。
+
+        ★ 为什么这里也要接熔断（README 的"重试 / 超时 / 熔断"指的是 arXiv 这个对外 HTTP 出口）：
+        arXiv 5xx / 连不上时，重试救不了"整个服务端挂了"，而一次研究可能连着打几十次请求，
+        每次都白等 3 秒限速 + 3 次退避 —— 既把自己的时间烧光，也是在给下游施压。
+        接上熔断后，连续若干**整段调用**失败就会在本地快速失败，
+        `ensure_corpus` 的既有降级分支（`corpus_ready=False` → 直接写作）立刻生效。
+
+        `attempts=1` 是刻意的：**重试这一层已经由下面的 tenacity 循环做了**，
+        `guarded` 只补"总时间预算 + 熔断"，绝不能再叠一层重试（否则 3×N 次请求，
+        既超 arXiv 限速又烧配额）。顺序仍是「重试在内、熔断在外」，与 `resilient()` 一致。
         """
+        settings = self.settings
+        if not (settings.resilience_enabled and settings.breaker_for_http):
+            return await self._retry_loop(params)
+
+        from app.core.resilience import BREAKER_HTTP, guarded
+
+        return await guarded(
+            self._retry_loop,
+            params,
+            breaker_name=BREAKER_HTTP,
+            attempts=1,
+            # 整段（含内部 3 次重试）的预算：比 3 次 30s 超时短一档，卡死时快速失败
+            seconds=float(settings.http_timeout) * 3 + 15.0,
+        )
+
+    async def _retry_loop(self, params: dict) -> dict:
+        """原有的 tenacity 重试循环（被 `_request_with_retry` 套在熔断**里面**）。"""
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(3),
             wait=wait_exponential(multiplier=1, max=8) + wait_random(0, 1),

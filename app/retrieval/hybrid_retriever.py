@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import defaultdict
 from collections.abc import Sequence
@@ -111,6 +112,25 @@ class IndexCompatibilityError(RuntimeError):
     """
 
 
+def corpus_digest(records: Sequence[ChunkRecord], titles: dict[str, str] | None = None) -> str:
+    """语料内容指纹：chunk 文本/元数据或论文标题任一变化，指纹就变。
+
+    存在的理由是 `ensure_corpus` 的那个取舍：索引每次无条件重建太贵
+    （每次提问都要把全部 chunk 重新 encode 一遍，本地 BGE 下以分钟计），
+    但"索引非空就跳过"又会让换模型/改分块后的旧索引**静默失真**。
+    指纹把两者分开 —— 内容没变就跳过，内容变了必然重建，不靠人记得手动跑脚本。
+    """
+    h = hashlib.sha256()
+    for r in sorted(records, key=lambda x: x.chunk_id):
+        h.update(
+            f"{r.chunk_id}\x1f{r.arxiv_id}\x1f{r.section}\x1f{r.source}\x1f"
+            f"{r.chunk_type}\x1f{r.text}\n".encode()
+        )
+    for arxiv_id in sorted(titles or {}):
+        h.update(f"T\x1f{arxiv_id}\x1f{titles[arxiv_id]}\n".encode())
+    return h.hexdigest()[:16]
+
+
 class HybridRetriever:
     """向量 + BM25 混合检索的编排者。"""
 
@@ -141,6 +161,8 @@ class HybridRetriever:
         # 未知时不阻塞检索，但要提醒 —— 直接报错会让老用户升级后完全用不了。
         self.index_identity: str | None = None
         self.index_built_at: str | None = None
+        # 索引对应的**语料内容指纹**（见 corpus_digest）。None = 老索引没写过，视为需要重建。
+        self.index_corpus_digest: str | None = None
         # 索引文件三件套（faiss / bm25 / meta）必须一起恢复：只 load 向量与 BM25
         # 而不恢复 chunk 元数据，`_chunks` 会是空的，`is_empty` 判定为真，
         # 于是"进程重启后检索永远返回空"—— 这是最隐蔽的一类 bug（不报错，只是没结果）。
@@ -183,6 +205,23 @@ class HybridRetriever:
             "不同 embedding 模型的向量空间互不相通 —— 维度即使相同，继续检索也只会得到噪声。\n"
             "修复：python scripts/build_index.py   （语料存在数据库里，重建不需要重新抓 arXiv）"
         )
+
+    def index_is_current(
+        self, records: Sequence[ChunkRecord], titles: dict[str, str] | None = None
+    ) -> bool:
+        """磁盘上的索引能否直接复用（内容指纹 + embedding 指纹都对得上）。
+
+        判 False 的三种情况都要重建，缺一不可：
+        索引为空、老索引没写 `corpus_digest`、语料内容或 embedding 模型变了。
+        这里宁可多建一次索引，也不能让"内容变了但没重算向量"这种静默失真走出去。
+        """
+        if self.is_empty or self.index_corpus_digest is None:
+            return False
+        if self.index_identity != self.embedder.identity:
+            return False
+        if not (self.faiss_path.exists() and self.bm25_path.exists() and self.meta_path.exists()):
+            return False
+        return self.index_corpus_digest == corpus_digest(records, titles)
 
     # ------------------------------------------------------------------ 建索引
     async def build_index(self, records: Sequence[ChunkRecord], titles: dict[str, str]) -> int:
@@ -443,11 +482,15 @@ class HybridRetriever:
             #   没有这一条，用户换 embedding 服务商后无从判断该不该重建索引 ——
             #   而这恰恰是"clone 下来接自己的 API"时最常见的一步操作。
             "embedding_identity": np.asarray([self.embedder.identity], dtype=object),
+            "corpus_digest": np.asarray(
+                [corpus_digest(self._chunks.values(), self._titles)], dtype=object
+            ),
             "built_at": np.asarray([built_at], dtype=object),
         }
         np.savez_compressed(self.meta_path, **payload)
         # 落盘之后，索引的指纹就是当前 embedder 的指纹（供同进程内后续检查直接使用）
         self.index_identity = self.embedder.identity
+        self.index_corpus_digest = str(payload["corpus_digest"][0])
         self.index_built_at = built_at
 
         # 再写一份**极简清单**。存在的理由很实际：健康检查是高频接口，
@@ -459,6 +502,7 @@ class HybridRetriever:
             "chunks": len(self._chunks),
             "papers": len(self._titles),
             "reranker": getattr(self.reranker, "name", None),
+            "corpus_digest": self.index_corpus_digest,
         }
         (self.index_dir / "paperpilot.manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -494,3 +538,5 @@ class HybridRetriever:
             self.index_identity = str(data["embedding_identity"][0])
         if "built_at" in data:
             self.index_built_at = str(data["built_at"][0])
+        if "corpus_digest" in data:
+            self.index_corpus_digest = str(data["corpus_digest"][0])

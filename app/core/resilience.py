@@ -40,11 +40,13 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
 import httpx
+import structlog
 from tenacity import (
     AsyncRetrying,
     retry_if_exception,
@@ -54,6 +56,8 @@ from tenacity import (
 )
 
 T = TypeVar("T")
+
+logger = structlog.get_logger(__name__)
 
 # =============================================================================
 # 异常分类：决定"要不要重试"
@@ -83,6 +87,8 @@ def is_retryable(exc: BaseException) -> bool:
     分类依据（架构 §11）：
     - 网络层：`httpx.TransportError` / `httpx.TimeoutException` / `ConnectionError` / 超时
     - HTTP 5xx：下游服务端故障，可能自愈 → 重试
+    - HTTP 429：限流。它是**唯一值得重试的 4xx**（退避后通常能过），
+      而 openai/兼容端点抛的是 `openai.RateLimitError`，不是 httpx 异常
     - HTTP 4xx：请求本身有问题（参数错、context 超长）→ **不重试**，重试也是白费
     """
     if isinstance(exc, PermanentError):
@@ -95,6 +101,23 @@ def is_retryable(exc: BaseException) -> bool:
         return True
     if isinstance(exc, ConnectionError):  # 含 ConnectionResetError 等
         return True
+    # provider SDK 的异常（openai / 各家兼容端点）**不是 httpx 异常**，
+    # 只看 isinstance 会把"连接被重置"判成不可重试 —— 于是最该重试的一类故障被放过。
+    # 这里用鸭子类型（status_code + 类名）识别，不引入 openai 依赖。
+    return _provider_error_is_retryable(exc)
+
+
+def _provider_error_is_retryable(exc: BaseException) -> bool:
+    """识别 OpenAI 兼容 SDK 抛出的可重试错误（不 import 这些包，靠鸭子类型）。"""
+    module = type(exc).__module__ or ""
+    if not module.startswith(("openai", "anthropic", "httpx")):
+        return False
+    name = type(exc).__name__
+    if any(k in name for k in ("APIConnectionError", "APITimeoutError", "ConnectionClosed", "InternalServerError")):
+        return True
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status == 429 or status >= 500
     return False
 
 
@@ -186,6 +209,10 @@ class CircuitBreaker:
 
     `time_source` 可注入（默认 `time.monotonic`）：单测用假时钟推进冷却时间，
     避免真的 `sleep(60)`。
+
+    `observer` 可注入：每次**状态迁移**都会被调用 `(旧态, 新态, breaker)`，
+    同时本模块固定打一条 `resilience.state_changed` 结构化日志。
+    这两条就是"熔断不是死代码"的观测面 —— 运维看日志、前端看 SSE 都从这里出。
     """
 
     def __init__(
@@ -195,6 +222,7 @@ class CircuitBreaker:
         failure_threshold: int = 5,
         recovery_timeout: float = 60.0,
         time_source: Callable[[], float] = time.monotonic,
+        observer: Callable[[str, str, CircuitBreaker], None] | None = None,
     ) -> None:
         if failure_threshold < 1:
             raise ValueError("failure_threshold 必须 >= 1")
@@ -202,11 +230,17 @@ class CircuitBreaker:
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
         self._time = time_source
+        self._observer = observer
 
         self._state = STATE_CLOSED
         self._failures = 0
         self._opened_at = 0.0
         self._half_open_trial_used = False
+        # 观测用：迁移次数 + 最近一次迁移（`breaker_snapshot()` 会把它端出去给 /healthz）
+        self.transition_count = 0
+        self.last_transition: dict[str, Any] | None = None
+        # 统计：让"熔断到底拦了多少次"可量化（拦截数 = 快速失败数）
+        self.short_circuited = 0
 
     # ----------------------------- 只读视图 -----------------------------
     @property
@@ -221,13 +255,48 @@ class CircuitBreaker:
     def is_open(self) -> bool:
         return self._state == STATE_OPEN
 
+    # ----------------------------- 观测 -----------------------------
+    def _set_state(self, new_state: str, *, reason: str) -> None:
+        """唯一的状态写入点：改动状态必顺带打日志 + 通知 observer。
+
+        为什么"唯一"很重要：状态迁移一旦能从多处直接赋值，
+        observability 就会漏（最常见的假绿：日志里永远看不到 open）。
+        """
+        old = self._state
+        if old == new_state:
+            return
+        self._state = new_state
+        self.transition_count += 1
+        self.last_transition = {
+            "from": old,
+            "to": new_state,
+            "reason": reason,
+            "failures": self._failures,
+            "at": self._time(),
+        }
+        logger.warning(
+            "resilience.state_changed",
+            breaker=self.name,
+            from_state=old,
+            to_state=new_state,
+            reason=reason,
+            failures=self._failures,
+            threshold=self.failure_threshold,
+            recovery_timeout=self.recovery_timeout,
+        )
+        if self._observer is not None:
+            try:
+                self._observer(old, new_state, self)
+            except Exception as exc:  # noqa: BLE001 - 观测器绝不能把主流程带崩
+                logger.warning("resilience.observer_failed", breaker=self.name, error=str(exc)[:200])
+
     # ----------------------------- 状态迁移 -----------------------------
     def _allow_request(self) -> bool:
         """判断本次请求能否放行；顺带完成 open→half_open 的时间迁移。"""
         if self._state == STATE_OPEN:
             if self._time() - self._opened_at >= self.recovery_timeout:
                 # 冷却结束：切到半开，放行且**只放行一次**试探
-                self._state = STATE_HALF_OPEN
+                self._set_state(STATE_HALF_OPEN, reason="recovery_timeout_elapsed")
                 self._half_open_trial_used = True
                 return True
             return False
@@ -239,26 +308,27 @@ class CircuitBreaker:
         return True  # closed
 
     def _on_success(self) -> None:
+        previous = self._state
         self._failures = 0
-        self._state = STATE_CLOSED
         self._half_open_trial_used = False
+        self._set_state(STATE_CLOSED, reason="trial_succeeded" if previous == STATE_HALF_OPEN else "success")
 
     def _on_failure(self) -> None:
         self._failures += 1
         if self._state == STATE_HALF_OPEN:
             # 半开试探失败：立即重新打开，重新计冷却
-            self._state = STATE_OPEN
             self._opened_at = self._time()
             self._half_open_trial_used = False
+            self._set_state(STATE_OPEN, reason="half_open_trial_failed")
             return
         if self._failures >= self.failure_threshold:
-            self._state = STATE_OPEN
             self._opened_at = self._time()
             self._half_open_trial_used = False
+            self._set_state(STATE_OPEN, reason=f"failure_threshold_reached({self.failure_threshold})")
 
     def reset(self) -> None:
         """手动复位（测试与运维手动解熔断用）。"""
-        self._state = STATE_CLOSED
+        self._set_state(STATE_CLOSED, reason="manual_reset")
         self._failures = 0
         self._opened_at = 0.0
         self._half_open_trial_used = False
@@ -280,6 +350,14 @@ class CircuitBreaker:
         ⚠️ 计数语义：**一次 `call` 只记一次成败**，这正是"断路器包在重试外面"的体现。
         """
         if not self._allow_request():
+            self.short_circuited += 1
+            logger.warning(
+                "resilience.short_circuited",
+                breaker=self.name,
+                state=self._state,
+                failures=self._failures,
+                degraded=fallback is not _UNSET,
+            )
             if fallback is _UNSET:
                 raise CircuitOpenError(
                     f"熔断器[{self.name}] 已打开，拒绝请求（连续失败 {self._failures} 次）"
@@ -336,7 +414,7 @@ def resilient(
         )(fn)
 
         @functools.wraps(fn)
-        async def guarded(*args: Any, **kwargs: Any) -> T:
+        async def protected(*args: Any, **kwargs: Any) -> T:
             async def once() -> T:
                 # 中间层：给整段重试一个总时间预算
                 return await with_timeout(retried(*args, **kwargs), seconds)
@@ -346,12 +424,131 @@ def resilient(
                 return await breaker.call(once)
             return await breaker.call(once, fallback=fallback)
 
-        return guarded
+        return protected
 
     return decorate
 
 
+# =============================================================================
+# 进程内熔断器注册表（把熔断"接进主流程"的落点）
+# =============================================================================
+# 为什么要有注册表，而不是每个调用点各 new 一个：
+# 熔断的语义是"**对某个下游**的连续失败计数"。若每个节点各建一个 breaker，
+# LLM 挂了会有 6 个各自只数到 1 的计数器 —— 谁也打不开，等于没接。
+BREAKER_LLM = "llm"  # LLM provider（ChatModel 调用）
+BREAKER_HTTP = "http"  # 对外 HTTP 出口（arXiv / OpenAlex / embedding API）
+
+_breakers: dict[str, CircuitBreaker] = {}
+_breakers_lock = threading.Lock()
+
+
+def get_breaker(
+    name: str = BREAKER_LLM,
+    *,
+    observer: Callable[[str, str, CircuitBreaker], None] | None = None,
+    force_new: bool = False,
+) -> CircuitBreaker:
+    """取（并按需创建）名为 `name` 的熔断器。阈值在**创建时**从 settings 读。
+
+    `observer` 只在首次创建时生效（注册表里已有同名实例时不会覆盖），
+    需要换 observer 时先 `reset_breakers()` —— 这是刻意的：
+    让"谁在观测"这件事和"被观测的计数"同生命周期，避免半路换观测器丢掉已累计的失败数。
+    """
+    with _breakers_lock:
+        if force_new or name not in _breakers:
+            from app.core.config import get_settings  # 延迟到函数内：本模块可被单独引用
+
+            s = get_settings()
+            _breakers[name] = CircuitBreaker(
+                name,
+                failure_threshold=int(s.breaker_failure_threshold),
+                recovery_timeout=float(s.breaker_recovery_timeout),
+                observer=observer,
+            )
+        return _breakers[name]
+
+
+def reset_breakers() -> None:
+    """清空注册表（测试用例之间隔离用，也可运维手动解熔断）。"""
+    with _breakers_lock:
+        _breakers.clear()
+
+
+def breaker_snapshot() -> dict[str, dict[str, Any]]:
+    """所有熔断器的只读快照，`GET /healthz` 直接端出去。
+
+    这是"熔断不是死代码"最直白的证据：不看这段代码，光看 /healthz 就能确认
+    某个下游现在是不是被熔断着、已经被快速失败拦掉了多少次。
+    """
+    with _breakers_lock:
+        items = list(_breakers.items())
+    return {
+        name: {
+            "state": b.state,
+            "failures": b.failure_count,
+            "failure_threshold": b.failure_threshold,
+            "recovery_timeout": b.recovery_timeout,
+            "short_circuited": b.short_circuited,
+            "transitions": b.transition_count,
+            "last_transition": b.last_transition,
+        }
+        for name, b in items
+    }
+
+
+async def guarded[T](
+    func: Callable[..., Awaitable[T]],
+    /,
+    *args: Any,
+    breaker_name: str = BREAKER_LLM,
+    observer: Callable[[str, str, CircuitBreaker], None] | None = None,
+    attempts: int | None = None,
+    seconds: Any = _UNSET,
+    fallback: Any = _UNSET,
+    **kwargs: Any,
+) -> T:
+    """**调用时**组装 `重试 → 超时 → 熔断（→ 降级）` 并执行一次 `func`。
+
+    与装饰器版 `resilient()` 的分工：
+    - `resilient()` 在**定义时**绑定参数，适合固定的函数；
+    - `guarded()` 在**调用时**读 settings，因此 `RESILIENCE_ENABLED=false`
+      与测试里的阈值/退避调整都能立刻生效，不必重新 import。
+    两者共用同一套组装逻辑（本函数内部就是调 `resilient`），
+    所以 `tests/test_resilience.py` 里"一次调用只记一次失败"的顺序断言
+    对本路径同样成立 —— 不存在"测的是一套、跑的是另一套"。
+
+    `seconds` 省略时用 `settings.resilience_timeout`；显式传 `None` 表示
+    "这次调用不设总时间预算"。
+
+    `RESILIENCE_ENABLED=false` 时**直接透传**：这是"宁可旁路也不堵死链路"的承诺 ——
+    保护逻辑本身出问题时，一条环境变量就能退回裸调用。
+    """
+    from app.core.config import get_settings
+
+    s = get_settings()
+    if not s.resilience_enabled:
+        return await func(*args, **kwargs)
+
+    breaker = get_breaker(breaker_name, observer=observer)
+    retry_attempts = int(attempts if attempts is not None else s.resilience_attempts)
+    timeout = s.resilience_timeout if seconds is _UNSET else seconds
+
+    wrapper = resilient(
+        breaker,
+        # 预算 <=0 一律按"不设超时"处理（与 config 里 `RESILIENCE_TIMEOUT<=0` 的语义一致）
+        seconds=float(timeout) if timeout is not None and float(timeout) > 0 else None,
+        attempts=retry_attempts,
+        multiplier=float(s.resilience_backoff),
+        max_wait=float(s.resilience_max_backoff),
+        jitter=(0.0, float(s.resilience_jitter)),
+        fallback=fallback,
+    )(func)
+    return await wrapper(*args, **kwargs)
+
+
 __all__ = [
+    "BREAKER_HTTP",
+    "BREAKER_LLM",
     "CircuitBreaker",
     "CircuitOpenError",
     "PermanentError",
@@ -359,7 +556,11 @@ __all__ = [
     "STATE_HALF_OPEN",
     "STATE_OPEN",
     "TransientError",
+    "breaker_snapshot",
+    "get_breaker",
+    "guarded",
     "is_retryable",
+    "reset_breakers",
     "resilient",
     "retry_async",
     "with_timeout",

@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     # local   = 真正的 BGE 交叉编码器（需装 [local] 依赖）
     # lexical = 词面重叠降级（无需模型、确定性，供离线与单测使用）
     rerank_provider: Literal["local", "lexical"] = "local"
+    # HF 仓库名（如 BAAI/bge-reranker-v2-m3，首次加载自动下载）**或本地目录**
+    # （如 models/bge-reranker-v2-m3）。权重缺失时不会崩：预检后自动降级 lexical，
+    # 并在日志里给出可照抄的下载命令（含 HF_ENDPOINT=https://hf-mirror.com 镜像）。
     rerank_model: str = "BAAI/bge-reranker-v2-m3"
 
     # ---------------------------- 检索 -------------------------------
@@ -95,10 +98,46 @@ class Settings(BaseSettings):
     max_revision: int = 2
     confirm_outline: bool = False
 
+    # ------------------- 容错：重试 / 超时 / 熔断 -------------------
+    # 关掉 = 三层保护全部旁路（LLM 调用直接透传）。
+    # 默认开；离线 / mock 场景不需要关，因为 MockChatModel 永不失败、断路器永远闭合，
+    # 而"关掉才跑得通"本身就是一个 bug（说明保护和链路互相打架）。
+    resilience_enabled: bool = True
+    # 一次 LLM 调用（**含内部重试**）的总时间预算；<=0 表示不设超时。
+    # 语义见 `app/core/resilience.py` 模块 docstring：预算按整次调用计，不按每次尝试计，
+    # 否则最坏延迟 = 尝试数 × 超时，SSE 这种交互式场景受不了。
+    # ⚠️ 应 ≥ `LLM_TIMEOUT × RESILIENCE_ATTEMPTS + 退避`，否则时间预算会把还差一次的
+    #    调用掐死（表现为"明明第二就该成功了"）。默认 180 = 60s × 2 次 + 退避余量。
+    resilience_timeout: float = 180.0
+    resilience_attempts: int = 2
+    # 指数退避的乘数 / 上限 / 随机抖动上界（秒）。测试把三个都设 0 就不会真的等待；
+    # 生产保持默认 —— 惊群与"把刚缓过来的下游再打趴"靠的就是这几秒。
+    resilience_backoff: float = 1.0
+    resilience_max_backoff: float = 8.0
+    resilience_jitter: float = 0.5
+    # 连续多少次"整段调用失败"（内部重试若干次仍失败）才打开熔断
+    breaker_failure_threshold: int = 5
+    # 熔断打开后的冷却时长；冷却结束放行一次半开试探
+    breaker_recovery_timeout: float = 60.0
+    # 对外 HTTP（arXiv / OpenAlex / embedding API）出口是否也挂熔断
+    breaker_for_http: bool = True
+
+    # ------------------------- 输入侧防护 ---------------------------
+    # 用户可控文本（研究问题、编辑后的子问题）进图之前过 `app.core.security.validate_input`。
+    input_guard_enabled: bool = True
+    input_max_chars: int = 4000
+    # reject  = 命中注入模式直接 400 拒绝（默认：研究工具没有"降级为纯检索"的必要）
+    # degrade = 放行但使用清洗后的文本并打告警日志（用户只是转述论文原句时不误伤）
+    input_injection_action: Literal["reject", "degrade"] = "reject"
+
     # --------------------- 追踪 / 评测（可选）------------------------
+    # ★ 这三个值会在 lifespan 里同步进 os.environ（见 `app/observability/tracing.py`），
+    #   因此 `.env` 里配了就真的生效；没配则安静跳过（不发网络请求、不影响跑通链路）。
     langchain_tracing_v2: bool = False
     langchain_api_key: str = ""
     langchain_project: str = "paperpilot"
+    # LangSmith 端点（私有部署 / 自检时改它）；留空则用 langsmith 的默认端点
+    langchain_endpoint: str = ""
 
     # ---------------------------- 存储 -------------------------------
     data_dir: Path = Path("./data")
@@ -158,6 +197,10 @@ class Settings(BaseSettings):
             "rerank_enabled": self.rerank_enabled,
             "mock_mode": self.mock_mode,
             "llm_configured": self.llm_configured,
+            # 容错与安全的"开关面板"：只报状态，绝不报阈值之外的敏感值
+            "resilience_enabled": self.resilience_enabled,
+            "input_guard_enabled": self.input_guard_enabled,
+            "tracing_enabled": bool(self.langchain_tracing_v2 and self.langchain_api_key),
         }
 
 

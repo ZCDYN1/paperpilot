@@ -46,6 +46,17 @@ class Evidence(TypedDict, total=False):
     locator: str      # 章节 / 页码
     source: str       # html=正文原文 / abstract=摘要级降级证据，UI 必须如实展示
     verified: bool    # 由 verifier 写回；None 表示尚未校验
+    verify_note: str  # verifier 写回的失败原因（通过时为空串）；finalize 落进 citations.note
+    # ★ verifier 重锚后**真正落在哪个片段上**（只有定位被纠正过时才存在）。
+    # 为什么不直接改写 chunk_id：`merge_evidence` 的去重键是
+    # `(paper_id, chunk_id, claim)`，改了键就等于"新增一条"而不是"覆盖这一条"，
+    # 于是状态里会同时留下纠正前后两条 —— 那条纠正前的会在落库时被外键保护
+    # 写成 NULL，等于凭空多出一条"看起来失败"的引用。
+    # 所以纠正结果另记一笔，由 `finalize` 落库时优先采用。
+    resolved_chunk_id: int
+    resolved_paper_id: str
+    resolved_source: str
+    resolved_locator: str
 
 
 def merge_token_usage(a: dict[str, int], b: dict[str, int]) -> dict[str, int]:

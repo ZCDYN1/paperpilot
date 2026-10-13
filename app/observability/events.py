@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import AsyncIterator
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -47,6 +48,60 @@ EVENT_TYPES: tuple[str, ...] = (
 )
 
 _EVENT_TYPE_SET = frozenset(EVENT_TYPES)
+
+# ---------------------------------------------------------------------------
+# "带外事件"（out-of-band）：当前 SSE 流绑定 + 侧信道队列
+# ---------------------------------------------------------------------------
+# 为什么需要侧信道：事件通常由节点写进 `state["events"]`、由 `stream()` 取出。
+# 但有些事实发生在**节点内部、且必须立刻让用户看到** —— 典型就是容错层：
+# LLM 下游被熔断、本次调用被降级。这类信息没有 state 字段可放
+# （为了它去改 `ResearchState` 与各节点的返回值，代价远大于收益），
+# 所以给发射器开一条"直接投喂"的口子，`stream()` 每收到一个 chunk 就顺带 drain 一次。
+#
+# 为什么用 contextvar 而不是把 emitter 一路传参：`structured_invoke` 埋在节点实现里，
+# 逐层透传 emitter 会污染所有函数签名。而 asyncio 任务创建时会**复制当前上下文**，
+# 所以 `stream()`（API 请求任务）里绑定的 emitter，节点子任务天然能读到；
+# 读不到时（脚本、单测直接调函数）就只剩结构化日志 —— 这是刻意的降级，绝不报错。
+_current_emitter: ContextVar[SSEEmitter | None] = ContextVar("paperpilot_current_emitter", default=None)
+
+
+def bind_emitter(emitter: SSEEmitter | None) -> Token:
+    """绑定当前 SSE 流，返回用于 `unbind_emitter` 的 token。"""
+    return _current_emitter.set(emitter)
+
+
+def unbind_emitter(token: Token) -> None:
+    """解绑当前流。**必须容忍跨 Context**：
+
+    `stream()` 是异步生成器，它的 `finally` 可能在**另一个 Context** 里执行
+    （调用方提前 break、生成器被 `aclose()`、或 LangGraph 在子任务里推进迭代器）。
+    那时 `Token.reset()` 会抛 `ValueError: was created in a different Context` ——
+    而这个异常原本只会污染"流已经跑完"的正常收尾，把一次成功的运行变成 500。
+    兜底做法是显式写回 None：值层面的正确性拿到了，跨 Context 的 token 语义只能放弃。
+    """
+    try:
+        _current_emitter.reset(token)
+    except ValueError:
+        logger.debug("sse.emitter_unbind_cross_context")
+        _current_emitter.set(None)
+
+
+def get_emitter() -> SSEEmitter | None:
+    """当前上下文绑定的发射器（不在流内时为 None）。"""
+    return _current_emitter.get()
+
+
+def emit_out_of_band(event_type: str, **data: Any) -> bool:
+    """向"当前这条流"投喂一条事件；没有流在跑就只打日志并返回 False。
+
+    给容错/安全层用：它们不该为了发一条事件而依赖 API 层，也不该因为发不出事件而失败。
+    """
+    emitter = _current_emitter.get()
+    if emitter is None:
+        logger.debug("sse.no_stream_bound", event_type=event_type, **data)
+        return False
+    emitter.emit_out_of_band(event_type, **data)
+    return True
 
 
 @dataclass(slots=True)
@@ -96,7 +151,14 @@ class SSEEmitter:
         self.run_id = run_id
         self.schema_version = schema_version
         self._buffer: list[SSEEvent] = []
+        # 侧信道队列（见模块级 `emit_out_of_band` 的说明）。与 `_buffer` 分开是有意的：
+        # `_buffer` 里存的是"已经由便捷方法 yield 出去过"的事件，混用会重复发帧。
+        self._oob: list[SSEEvent] = []
         self._token_usage: dict[str, Any] = {}
+        # 这条流最后停在哪：`ok` / `interrupted` / `error`。
+        # API 层据此决定 `research_runs.status` —— 以前流一结束就写 completed，
+        # 于是"停在 HITL 等用户确认"的 run 也显示成已完成（状态说谎）。
+        self.last_status: str = "ok"
 
     # ------------------------------------------------------------ 基础发射
     def emit(self, event_type: str, **data: Any) -> SSEEvent:
@@ -112,6 +174,25 @@ class SSEEmitter:
         ev = SSEEvent(type=event_type, data=data)
         self._buffer.append(ev)
         return ev
+
+    def emit_out_of_band(self, event_type: str, **data: Any) -> SSEEvent:
+        """不经 state、由任意层直接投喂一条事件（容错/安全层用）。
+
+        仍然走 `emit()` 的类型校验：**事件协议是对外契约**，
+        侧信道不是"可以随便加类型"的后门 —— 未知类型照样报错。
+        """
+        ev = self.emit(event_type, **data)
+        # emit() 已经把事件放进 `_buffer`；侧信道要的是"马上被 stream() 取走"，
+        # 所以把它从 `_buffer` 里挪过来，避免将来有人 drain() 时二次发出。
+        if self._buffer and self._buffer[-1] is ev:
+            self._buffer.pop()
+        self._oob.append(ev)
+        return ev
+
+    def drain_out_of_band(self) -> list[SSEEvent]:
+        """取走并清空侧信道队列。"""
+        events, self._oob = self._oob, []
+        return events
 
     def drain(self) -> list[SSEEvent]:
         """取走并清空缓冲区（节点事件通常这么消费）。"""
@@ -260,40 +341,50 @@ class SSEEmitter:
             # 也就无法在中断后调 resume（表现为"HITL 功能没反应"，很难查）。
             yield self.run_started(inputs.get("question", "") if inputs else "").to_sse()
 
+        # 把这条流绑进当前上下文：节点子任务（asyncio 会复制上下文）里的容错层
+        # 就能通过 `emit_out_of_band()` 直接给用户发事件（熔断打开 / 降级等）。
+        token = bind_emitter(self)
         interrupted: dict[str, Any] | None = None
-        async for chunk in graph.astream(inputs, config, stream_mode="updates"):
-            # 中断信号：LangGraph 把它放在 `__interrupt__` 键下
-            if "__interrupt__" in chunk:
-                interrupted = {"node": "interrupt"}
-                # ⚠️ 中断时必须**补发一个 interrupted 事件**，否则前端只看到流"卡住不动"，
-                # 用户会以为程序死了（架构 §7 必踩坑②）。
-                # payload 里带上**当前 state 的子问题**，前端才能立刻渲染"编辑子问题"面板 ——
-                # 只报"中断了"而不给可编辑内容，等于没实现 HITL。
-                payload: Any = None
-                try:
-                    snapshot = await graph.aget_state(config)
-                    values = getattr(snapshot, "values", None) or {}
-                    payload = {
-                        "sub_questions": values.get("sub_questions"),
-                        "stage": values.get("stage"),
-                    }
-                except Exception as exc:  # noqa: BLE001 - 拿不到 state 不该让流断掉
-                    logger.warning("sse.interrupt_state_unavailable", error=str(exc)[:200])
-                yield self.interrupted(
-                    at="after_plan",
-                    reason="用户在拆解后可编辑子问题",
-                    payload=payload,
-                ).to_sse()
-                continue
+        try:
+            async for chunk in graph.astream(inputs, config, stream_mode="updates"):
+                # 中断信号：LangGraph 把它放在 `__interrupt__` 键下
+                if "__interrupt__" in chunk:
+                    interrupted = {"node": "interrupt"}
+                    # ⚠️ 中断时必须**补发一个 interrupted 事件**，否则前端只看到流"卡住不动"，
+                    # 用户会以为程序死了（架构 §7 必踩坑②）。
+                    # payload 里带上**当前 state 的子问题**，前端才能立刻渲染"编辑子问题"面板 ——
+                    # 只报"中断了"而不给可编辑内容，等于没实现 HITL。
+                    payload: Any = None
+                    try:
+                        snapshot = await graph.aget_state(config)
+                        values = getattr(snapshot, "values", None) or {}
+                        payload = {
+                            "sub_questions": values.get("sub_questions"),
+                            "stage": values.get("stage"),
+                        }
+                    except Exception as exc:  # noqa: BLE001 - 拿不到 state 不该让流断掉
+                        logger.warning("sse.interrupt_state_unavailable", error=str(exc)[:200])
+                    yield self.interrupted(
+                        at="after_plan",
+                        reason="用户在拆解后可编辑子问题",
+                        payload=payload,
+                    ).to_sse()
+                else:
+                    for node_name, update in chunk.items():
+                        yield self.node_started(node_name).to_sse()
+                        if isinstance(update, dict):
+                            for ev in self.drain_state_events(update):
+                                yield ev.to_sse()
 
-            for node_name, update in chunk.items():
-                yield self.node_started(node_name).to_sse()
-                if isinstance(update, dict):
-                    for ev in self.drain_state_events(update):
-                        yield ev.to_sse()
+                # 每个 chunk 之后清一次侧信道：容错/安全层投喂的事件在这里落地。
+                # 放在 chunk 末尾（而不是每个事件都判断）能让"降级"紧跟在它发生的那一步之后出现。
+                for ev in self.drain_out_of_band():
+                    yield ev.to_sse()
+        finally:
+            unbind_emitter(token)
 
-        status = "interrupted" if interrupted else "ok"
-        yield self.done(status=status).to_sse()
+        self.last_status = "interrupted" if interrupted else "ok"
+        yield self.done(status=self.last_status).to_sse()
 
     # ------------------------------------------------------------------ 收尾
     async def flush_token_usage(self, by_node: dict[str, Any] | None = None) -> None:
@@ -308,4 +399,14 @@ class SSEEmitter:
         logger.info("sse.flushed", run_id=self.run_id, token_usage=self._token_usage)
 
 
-__all__ = ["EVENT_TYPES", "SCHEMA_VERSION", "SSEEmitter", "SSEEvent", "event_from_state"]
+__all__ = [
+    "EVENT_TYPES",
+    "SCHEMA_VERSION",
+    "SSEEmitter",
+    "SSEEvent",
+    "bind_emitter",
+    "emit_out_of_band",
+    "event_from_state",
+    "get_emitter",
+    "unbind_emitter",
+]

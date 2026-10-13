@@ -41,6 +41,20 @@ jobs:
           INGEST_ENABLED: "false"
         run: pytest -q
 
+      - name: API / SSE / 容错接线（离线专项）
+        # 单独一步的理由：这一组用例盯的是**对外契约与工程化接线**
+        # （SSE 事件类型、X-Accel-Buffering、HITL resume、输入侧注入防护、
+        #   熔断真的包住 LLM 与 HTTP 出口、LANGCHAIN_* 真的同步进环境）。
+        # 它们坏了不会让检索变差，只会让"承诺"变成空话 —— 所以要一条一眼能认出来的红。
+        # 全部用 tmp sqlite + mock provider，零网络、零模型权重。
+        env:
+          LLM_PROVIDER: mock
+          EMBEDDING_PROVIDER: mock
+          RERANK_PROVIDER: lexical
+          INGEST_ENABLED: "false"
+          MIN_CORPUS: "0"
+        run: pytest -q tests/test_api_research.py tests/test_api_observability.py tests/test_resilience_wiring.py
+
       - name: 评测冒烟（离线 · 检索消融）
         # 只验证「评测链路本身」能跑通，不验证检索质量：
         #   - EMBEDDING_PROVIDER=mock + RERANK_PROVIDER=lexical：不下载模型、不联网、不需要任何 key；
@@ -78,7 +92,13 @@ jobs:
           for i in $(seq 1 30); do
             if curl -fsS http://localhost:8000/healthz > /dev/null; then
               echo "✓ /healthz 就绪"
-              curl -s http://localhost:8000/healthz
+              health="$(curl -fsS http://localhost:8000/healthz)"
+              echo "$health"
+              # README 承诺的"熔断 / 追踪"必须在一个**刚 clone 起来**的容器里就看得见：
+              # 这两个面板是"工程化项不是 PPT"的最省事核查点，缺了就说明接线又变成死代码。
+              echo "$health" | grep -q '"resilience"' || { echo "✗ /healthz 未端出 resilience 面板"; docker logs paperpilot-ci; exit 1; }
+              echo "$health" | grep -q '"tracing"' || { echo "✗ /healthz 未端出 tracing 面板"; docker logs paperpilot-ci; exit 1; }
+              echo "✓ 熔断器与追踪状态已可见（resilience + tracing）"
               exit 0
             fi
             sleep 5

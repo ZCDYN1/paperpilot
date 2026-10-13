@@ -21,6 +21,7 @@ import time
 import structlog
 from sqlalchemy import select
 
+from app.core.console import force_utf8_output
 from app.db.models import Paper, PaperChunk
 from app.db.session import session_scope
 from app.retrieval.hybrid_retriever import ChunkRecord, HybridRetriever
@@ -89,4 +90,5 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
+    force_utf8_output()
     raise SystemExit(asyncio.run(main()))
