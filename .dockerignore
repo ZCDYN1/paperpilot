@@ -1,0 +1,24 @@
+# 构建上下文瘦身：不进镜像的东西一律排除，能显著加快 docker build
+.git/
+.github/
+.gitignore
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+data/
+.cache/
+logs/
+*.log
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/

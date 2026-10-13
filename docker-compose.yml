@@ -1,0 +1,63 @@
+# =============================================================================
+# PaperPilot 多服务编排
+# -----------------------------------------------------------------------------
+# 用法：
+#   cp .env.example .env          # 按需修改；不建 .env 也能起（默认走 mock 可跑通）
+#   docker compose up --build
+# 访问：
+#   API 文档  http://localhost:8000/docs
+#   健康检查  http://localhost:8000/healthz
+#   Streamlit http://localhost:8501
+# =============================================================================
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: paperpilot-api:latest
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: .env
+        required: false          # 未创建 .env 时也能启动
+    environment:
+      # 容器内路径统一收敛到 /app/data，与下面的 volume 一一对应
+      DATA_DIR: /app/data
+      FAISS_INDEX_DIR: /app/data/faiss
+      SQLITE_DIR: /app/data/sqlite
+      CHECKPOINT_DB: /app/data/sqlite/checkpoints.db
+      SQLITE_URL: sqlite+aiosqlite:////app/data/sqlite/paperpilot.db
+      # ⚠️ 必须与 Dockerfile 里的 HF_HOME 保持一致，否则模型权重缓存不到挂载点
+      HF_HOME: /app/.cache/huggingface
+    volumes:
+      - faiss_index:/app/data/faiss          # 向量索引
+      - sqlite_data:/app/data/sqlite         # 元数据 + LangGraph checkpoint
+      - hf_cache:/app/.cache/huggingface     # BGE 模型权重（~3GB，不挂则每次重下）
+    healthcheck:
+      # 用 python 而非 curl：slim 镜像里没有 curl
+      test: ["CMD", "python", "-c", "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s                     # 冷启动要加载模型/建索引，给足时间
+    stop_grace_period: 30s                   # 让进行中的研究有机会落 checkpoint
+    restart: unless-stopped
+
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    image: paperpilot-ui:latest
+    ports:
+      - "8501:8501"
+    environment:
+      API_BASE: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy           # 等 API 真正就绪，避免首个请求 502
+    restart: unless-stopped
+
+volumes:
+  faiss_index:
+  sqlite_data:
+  hf_cache:

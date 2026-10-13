@@ -1,0 +1,62 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# ---------- 环境变量 / 密钥（务必不要提交）----------
+.env
+.env.*
+!.env.example
+
+# ---------- 运行期数据：索引 / SQLite / checkpoint（体积大，且可重建）----------
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# ---------- 模型权重与缓存 ----------
+.cache/
+.cache_hf/
+models/
+
+# ---------- 样例数据：允许提交小体积 json，排除预建索引等大文件 ----------
+sample_data/*
+!sample_data/.gitkeep
+!sample_data/*.json
+
+# ---------- 日志 ----------
+*.log
+logs/
+
+# ---------- 测试 / 工具缓存 ----------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# ---------- 临时产物（调试/排查时容易产生，别带进仓库）----------
+_pptmp/
+*.tmp
+pytest_out*.txt
+run[0-9].txt
+base_run*.txt
+
+# ---------- IDE / OS ----------
+.idea/
+.vscode/
+*.swp
+*.swo
+Thumbs.db
+Desktop.ini
+.DS_Store
