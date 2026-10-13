@@ -41,6 +41,23 @@ jobs:
           INGEST_ENABLED: "false"
         run: pytest -q
 
+      - name: 评测冒烟（离线 · 检索消融）
+        # 只验证「评测链路本身」能跑通，不验证检索质量：
+        #   - EMBEDDING_PROVIDER=mock + RERANK_PROVIDER=lexical：不下载模型、不联网、不需要任何 key；
+        #   - 消融模块在索引为空时**也会退出 0**（只打印警告并产出一张空表），
+        #     所以这一步不依赖预建索引 —— 这正是它能无网络跑通的原因。
+        # 之所以要把它放进 CI：评测最容易「本地能跑、一进流水线就红」，
+        # 把这条链路钉死在 mock 模式下，能让它长期可复现。
+        env:
+          EMBEDDING_PROVIDER: mock
+          RERANK_PROVIDER: lexical
+          INGEST_ENABLED: "false"
+        run: |
+          python -m app.eval.ablation --output eval_results/ablation_ci.md
+          # 进一步确认：链路不只没崩，还真的产出了报告文件
+          test -f eval_results/ablation_ci.md
+          echo "✓ 评测冒烟通过：已产出 eval_results/ablation_ci.md"
+
   docker:
     name: 构建镜像
     runs-on: ubuntu-latest

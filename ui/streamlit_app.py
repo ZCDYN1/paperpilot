@@ -198,6 +198,71 @@ def _comparison_to_markdown(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# ==================================================================== 评测页辅助
+# 评测产物目录（消融报告落在这里）。用 ROOT 定位而不是相对 CWD ——
+# Streamlit 从任意目录启动时 CWD 都可能不同，用相对路径会读不到文件。
+EVAL_RESULTS_DIR = ROOT / "eval_results"
+
+# 报告展示的默认优先级：**真实数字优先**。
+# 之所以要排序而不是按文件名，是因为三份报告的 embedding 口径不同（local / api / mock），
+# 跨 embedding 的数字本就不可比；把 mock 那份放前面会让人误以为它是可信基线。
+_PREFERRED_ABLATION_REPORTS: tuple[str, ...] = (
+    "ablation_local_bge.md",
+    "ablation_bge_m3.md",
+    "ablation.md",
+)
+
+
+def _list_ablation_reports() -> list[Path]:
+    """列出 `eval_results/*.md`，按「真实数字优先」排序，供下拉选择。"""
+    if not EVAL_RESULTS_DIR.exists():
+        return []
+    files = {p.name: p for p in EVAL_RESULTS_DIR.glob("*.md")}
+    ordered = [files.pop(name) for name in _PREFERRED_ABLATION_REPORTS if name in files]
+    ordered += [files[name] for name in sorted(files)]
+    return ordered
+
+
+def _fetch_citation_accuracy(api_base: str, run_id: str) -> dict:
+    """从后端取一条 run 的**自动口径**引用准确率。
+
+    口径 = `citations.verified == True` 的占比（架构 §12 的免费口径，Verifier 节点已写回字段）。
+    这里**先确认 run 存在**（`GET /research/{run_id}` 不存在会返回 404），
+    否则一个不存在的 run_id 会被后端当成"0 条引用"、显示成"准确率 —"，
+    那等于拿"查无此 run"冒充"这次研究没有引用"，两种含义完全不同。
+
+    说明：后端没有单独的 `citation_accuracy` 路由，数值由 `/{run_id}/citations`
+    返回的 `verified_rate` / `citations[].verified` 现算，与 `ragas_runner.citation_accuracy` 口径一致。
+    """
+    detail = requests.get(f"{api_base}/api/v1/research/{run_id}", timeout=15)
+    if detail.status_code == 404:
+        raise ValueError(f"run_id={run_id} 不存在（后端返回 404）")
+    detail.raise_for_status()
+
+    payload = requests.get(
+        f"{api_base}/api/v1/research/{run_id}/citations", timeout=15
+    ).json()
+    citations = payload.get("citations") or []
+    total = payload.get("count", len(citations))
+    verified = sum(1 for c in citations if c.get("verified") is True)
+    accuracy = payload.get("verified_rate")
+    if accuracy is None and total:
+        accuracy = round(verified / total, 4)
+    return {"total": total, "verified": verified, "accuracy": accuracy, "method": "auto"}
+
+
+def _run_ragas_local(run_id: str | None):
+    """在面板进程内直接调用 RAGAS 运行器（后端未暴露评测路由）。
+
+    这样做的依据是运行器的硬约束：**不可用时不产出任何分数**（`EvalReport.available=False`
+    时携带分数会直接抛错）。所以面板可以放心地按 `available` 分支展示 —— 它不可能显示假分数。
+    `run_ids=None` 表示"库里现有的全部 run"。
+    """
+    from app.eval.ragas_runner import run_ragas_eval
+
+    return asyncio.run(run_ragas_eval(run_ids=[run_id] if run_id else None))
+
+
 # ==================================================================== 侧边栏
 with st.sidebar:
     st.title("📚 PaperPilot")
@@ -214,7 +279,9 @@ with st.sidebar:
 st.title("PaperPilot")
 st.caption("基于 LangGraph 多 Agent 的 arXiv 论文深度研究工具")
 
-tab_research, tab_search, tab_status = st.tabs(["🧭 深度研究", "🔍 检索试玩", "⚙️ 系统状态"])
+tab_research, tab_search, tab_eval, tab_status = st.tabs(
+    ["🧭 深度研究", "🔍 检索试玩", "📊 评测", "⚙️ 系统状态"]
+)
 
 # ================================================================== 深度研究
 with tab_research:
@@ -384,3 +451,157 @@ with tab_status:
         "- Token 按节点细分统计（当前是整体一条）\n"
         "- 对比表结构化抽取（产品定义里的核心产出物 A）"
     )
+
+# ====================================================================== 评测
+with tab_eval:
+    st.caption("把仓库里的评测能力搬到面板上：检索消融报告、索引状态、引用准确率、RAGAS。")
+
+    # ⭐ 这一句是整个页面的"诚实性说明"：用户必须先知道哪些数字不需要 key、哪些必须要真实 LLM，
+    # 才不会被"看起来像分数"的假数字误导。
+    st.info(
+        "**不需要 API key 就能算的指标**：\n"
+        "- ① 检索侧指标（Recall@5 / Precision@5 / nDCG@10 / MRR / 耗时）—— 只需要一个建好的索引；\n"
+        "- ③ **引用准确率（自动口径）**—— 只统计 `citations.verified` 的比例，零成本、可复现。\n\n"
+        "**需要真实 LLM 当裁判的指标**：\n"
+        "- ④ RAGAS 的五个生成侧指标（faithfulness / answer_relevancy / context_precision / "
+        "context_recall / answer_correctness）。\n"
+        "  在 mock 或未配 key 时它们**不可计算** —— 面板只显示「不可用 + 原因」，**绝不显示成 0 分**。"
+    )
+
+    # ---------------------------------------------------------------- ① 检索消融
+    st.divider()
+    st.subheader("① 检索消融结果")
+    st.caption(
+        "数据来源：`eval_results/*.md`（`make eval-ablation` 的产物）。"
+        "注意不同报告的 embedding 口径不同（local / api / mock），**跨 embedding 的数字不可横向比较**。"
+    )
+    reports = _list_ablation_reports()
+    if not reports:
+        st.warning(
+            "未找到 `eval_results/*.md`。先跑一次消融生成报告：\n\n"
+            "```bash\nmake eval-ablation\n```"
+        )
+    else:
+        names = [p.name for p in reports]
+        picked = st.selectbox(
+            "选择报告文件",
+            names,
+            index=0,
+            key="eval_report_pick",
+            help="默认优先展示本地 BGE 跑出的真实数字。",
+        )
+        st.caption("可选报告：" + "、".join(f"`{n}`" for n in names))
+        # 直接用 st.markdown 渲染 Markdown 表格 —— 报告本身就是 Markdown，不需要再解析成 DataFrame。
+        st.markdown((EVAL_RESULTS_DIR / picked).read_text(encoding="utf-8"))
+
+    # ---------------------------------------------------------------- ② 索引状态
+    st.divider()
+    st.subheader("② 索引状态")
+    st.caption("数据来源：后端 `GET /healthz` 的 `index` / `embedding` 字段。")
+    try:
+        health = requests.get(f"{api_base}/healthz", timeout=5).json()
+        idx = health.get("index") or {}
+        emb = health.get("embedding") or {}
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("索引就绪", "✅ 是" if idx.get("ready") else "❌ 否")
+        c2.metric("与 embedding 匹配", "✅ 匹配" if idx.get("compatible") else "⚠️ 不匹配")
+        c3.metric("chunk 数", idx.get("chunks") if idx.get("chunks") is not None else "—")
+        c4.metric("论文数", idx.get("papers") if idx.get("papers") is not None else "—")
+        st.caption(
+            f"built_at：`{idx.get('built_at')}`　·　built_with：`{idx.get('built_with')}`　·　"
+            f"当前 embedding：`{emb.get('identity')}`"
+        )
+
+        # ⚠️ `compatible=false` 是最容易"静默退化"的坑：换了 embedding 却不重建索引时，
+        # 维度相同的话连报错都没有，检索质量悄悄变差。所以这里必须显著提示，
+        # 并把后端已经写好的修复命令（hint 里就是它）原样透出，用户不用去翻文档。
+        if not idx.get("compatible"):
+            st.warning(
+                "**索引与当前 embedding 配置不匹配** —— 检索会静默退化成噪声，这份索引的结果不可信。\n\n"
+                + (idx.get("hint") or "请重建索引：`python scripts/build_index.py`")
+            )
+        elif not idx.get("ready"):
+            st.warning(idx.get("hint") or "索引尚未构建：`python scripts/build_index.py`")
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"读取 /healthz 失败：{exc}")
+        st.code("uvicorn app.main:app --port 8000", language="bash")
+
+    # ------------------------------------------------------------ ③ 引用准确率
+    st.divider()
+    st.subheader("③ 引用准确率（自动口径）")
+    st.caption(
+        "口径：`citations.verified == True` 的占比（架构 §12 的免费口径，由 Verifier 节点写回）。"
+        "这是**自动口径**；它不等于「人工抽检口径」—— 只报自动口径等于自己批改自己的作业，"
+        "两个口径都要报。"
+    )
+    # 后端没有"列出所有 run"的接口，因此**不新增后端接口**，改为让用户手工填写 run_id。
+    st.caption("提示：后端未提供 run 列表接口，请手工填写 run_id（可在「深度研究」页拿到）。")
+    rid = st.text_input(
+        "run_id", value=st.session_state.run_id or "", key="eval_run_id"
+    )
+    if st.button("查询引用准确率", key="eval_cite_go"):
+        if not rid.strip():
+            st.info("请先填写 run_id。")
+        else:
+            try:
+                acc = _fetch_citation_accuracy(api_base, rid.strip())
+                a1, a2, a3 = st.columns(3)
+                a1.metric("引用总数", acc["total"])
+                a2.metric("已校验为真", acc["verified"])
+                a3.metric(
+                    "准确率",
+                    "—" if acc["accuracy"] is None else f"{acc['accuracy']:.1%}",
+                )
+                # 明确标注口径，避免"自动口径"被误当成权威结论。
+                st.caption(
+                    f"口径：**自动**（method={acc['method']}）—— 仅统计已校验引用，"
+                    "尚未校验（verified=None）不计入分子。"
+                )
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"查询失败：{exc}")
+
+    # ------------------------------------------------------------------ ④ RAGAS
+    st.divider()
+    st.subheader("④ RAGAS 生成侧评测（可选）")
+    st.caption(
+        "RAGAS 的指标本质是「用 LLM 当裁判」，必须有真实生成模型；"
+        "无 key / mock 时运行器返回 `available=False`，此处只显示**原因**，不显示任何分数。"
+    )
+    if st.button("运行 RAGAS 评测", key="eval_ragas_go"):
+        with st.spinner("运行中…（缺少裁判模型时会立刻返回原因，不会产出假分数）"):
+            try:
+                report = _run_ragas_local(rid.strip() or None)
+                if not report.available:
+                    st.warning(f"RAGAS 不可用：{report.reason}")
+                    if report.skipped_metrics:
+                        st.caption(
+                            "被跳过的指标：" + "、".join(f"`{m}`" for m in report.skipped_metrics)
+                        )
+                else:
+                    st.success(
+                        f"RAGAS 可用 · 样本 {report.n_samples} 条"
+                        f"（其中含参考答案 {report.n_with_ground_truth} 条）"
+                    )
+                    st.dataframe(
+                        [{"指标": k, "分数": round(v, 4)} for k, v in report.metrics.items()],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    if report.skipped_metrics:
+                        st.caption(
+                            "被跳过的指标：" + "、".join(f"`{m}`" for m in report.skipped_metrics)
+                        )
+                    with st.expander("生成配置（分数可比性的前提：不记配置的分数没有可比性）"):
+                        st.json(report.generation_config)
+
+                # 引用准确率不依赖 LLM，任何情况下都能附上（自动口径）
+                if report.citation_accuracy:
+                    ca = report.citation_accuracy
+                    st.caption(
+                        f"附带的自动口径引用准确率：{ca['verified']}/{ca['total']}"
+                        f"（{ca['accuracy']:.1%}，method={ca.get('method')}）"
+                    )
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"运行 RAGAS 失败：{exc}")
+
