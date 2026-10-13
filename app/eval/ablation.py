@@ -426,8 +426,11 @@ def render_markdown(
             f"{skipped[0].metrics.n_skipped} 条查询因金标准为空被跳过（见 `evaluate_retrieval`）。"
         )
     footnotes.append(
-        "**耗时差异在本数据规模下可能与噪声同阶**：golden 只有 20 条、索引仅数百 chunk，"
-        "毫秒级差异不宜直接外推；Reranker 的真实延迟代价需在更大语料与并发下复测。"
+        # 这里的数字必须来自实际运行 —— 写死会随语料扩充而失真，
+        # 而一句"golden 只有 20 条"在 40 条时反而会误导读者低估结论。
+        f"**耗时差异在当前数据规模下仍可能含噪声**：本次 golden 为 {len(items)} 条查询、"
+        f"索引 {index_size} 个 chunk（{n_papers} 篇论文）。"
+        "毫秒级差异不宜直接外推 —— Reranker 的真实延迟代价需在更大语料与并发下复测。"
     )
 
     lines.append("## 脚注")

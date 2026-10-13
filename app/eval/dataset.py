@@ -20,7 +20,12 @@ from pathlib import Path
 
 # 默认数据集：与模块同级的 datasets/ 目录。
 # 用 __file__ 定位而不是相对 CWD，保证从任何工作目录调用都能找到。
-DEFAULT_GOLDEN_PATH = Path(__file__).resolve().parent / "datasets" / "golden_20.jsonl"
+#
+# `golden_20.jsonl` 是最初 5 篇语料时期的标注（20 条），保留作对照；
+# `golden_40.jsonl` 是语料扩到 24 篇后重标的版本（40 条，覆盖全部 24 篇论文），
+# 因此作为默认。语料规模变了就要重标 —— 否则新增论文没有金标准，
+# 它们对评测就是"死重量"：只会稀释指标，不会提升区分度。
+DEFAULT_GOLDEN_PATH = Path(__file__).resolve().parent / "datasets" / "golden_40.jsonl"
 
 
 @dataclass(frozen=True, slots=True)
