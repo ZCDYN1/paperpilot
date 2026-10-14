@@ -22,6 +22,34 @@ import numpy as np
 OVER_FETCH_FACTOR = 4
 
 
+def _write_index(faiss_module, index, target: Path) -> None:
+    """写索引：把路径交给 Python 的 `open()`，不交给 faiss 的 C++ 层。
+
+    faiss 自带的 `write_index(index, path)` 在 Windows 上是把路径的 UTF-8 字节丢给 CRT 的
+    `fopen`，而 CRT 按**当前 ANSI 代码页**（中文 Windows 是 GBK）解释那串字节 ——
+    只要目录名里有非 ASCII 字符就会报 `could not open ...`，
+    看起来像"索引文件损坏"，实际是编码问题，而且**只在中文/日文等路径上复现**，
+    所以 CI（英文路径）永远测不出来。
+    改走 `PyCallbackIOWriter` + Python 文件对象后，路径由 Python 的宽字符接口处理。
+    旧版 faiss 没有这两个回调类时退回原生写法：那时退回的是原生限制，不会新增失败模式。
+    """
+    writer_cls = getattr(faiss_module, "PyCallbackIOWriter", None)
+    if writer_cls is None:
+        faiss_module.write_index(index, str(target))
+        return
+    with open(target, "wb") as fh:
+        faiss_module.write_index(index, writer_cls(fh.write))
+
+
+def _read_index(faiss_module, path: Path):
+    """`_write_index` 的读侧对称实现（编码原因见其 docstring）。"""
+    reader_cls = getattr(faiss_module, "PyCallbackIOReader", None)
+    if reader_cls is None:
+        return faiss_module.read_index(str(path))
+    with open(path, "rb") as fh:
+        return faiss_module.read_index(reader_cls(fh.read))
+
+
 class FaissStore:
     """向量索引的极薄封装，只做「增 / 查 / 存 / 原子重建」。"""
 
@@ -99,14 +127,14 @@ class FaissStore:
         if target is None:
             raise ValueError("未指定索引保存路径")
         target.parent.mkdir(parents=True, exist_ok=True)
-        self._faiss.write_index(self.index, str(target))
+        _write_index(self._faiss, self.index, target)
 
     @classmethod
     def load(cls, path: Path | str, dim: int) -> FaissStore:
         store = cls(dim=dim, index_path=path)
         p = Path(path)
         if p.exists():
-            store.index = store._faiss.read_index(str(p))
+            store.index = _read_index(store._faiss, p)
         return store
 
     def rebuild_atomic(
@@ -133,7 +161,7 @@ class FaissStore:
         if target is not None:
             target.parent.mkdir(parents=True, exist_ok=True)
             tmp = target.with_name(target.name + ".tmp")
-            faiss.write_index(fresh, str(tmp))
+            _write_index(faiss, fresh, tmp)
             os.replace(tmp, target)  # 原子切换
 
         self.index = fresh

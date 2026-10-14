@@ -53,8 +53,12 @@ def test_crash_while_writing_leaves_the_old_index_readable(tmp_path):
 
     original_write = faiss.write_index
 
-    def half_write(index, where: str) -> None:  # 模拟进程在写 .tmp 途中被杀
-        Path(where).write_bytes(b"\x00\x01\x02 truncated mid-write")
+    def half_write(index, where) -> None:  # 模拟进程在写 .tmp 途中被杀
+        # 不去读 `where`：faiss 原生的第二参是路径，而 Unicode 安全的写法
+        # （见 `faiss_store._write_index`）传的是 PyCallbackIOWriter。
+        # 这个用例要模拟的是"中途被杀"，落在哪个文件上是 `rebuild_atomic` 的约定，
+        # 这里直接按同一个约定写坏 .tmp，两种 IO 写法下断言都成立。
+        path.with_name(path.name + ".tmp").write_bytes(b"\x00\x01\x02 truncated mid-write")
         raise OSError("索引写入中断")
 
     faiss.write_index = half_write
