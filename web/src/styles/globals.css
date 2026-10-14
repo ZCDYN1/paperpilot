@@ -1,0 +1,293 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* =============================================================================
+   Design Tokens —— 全项目颜色 / 字体 / 阴影 / 动效时长的唯一真相源
+   组件里不允许出现 #hex，图表配置通过 `src/config/theme.ts` 读这些变量。
+   换主题 = 改这一段。
+   ========================================================================== */
+:root {
+  /* --- 背景：深空黑 → 深灰蓝 --- */
+  --bg-base: #0a0e1a;
+  --bg-raised: #111827;
+  --bg-panel: #0d1322;
+
+  /* --- 玻璃拟态 --- */
+  --glass-bg-start: rgba(255, 255, 255, 0.03);
+  --glass-bg-end: rgba(255, 255, 255, 0.01);
+  --glass-blur: 12px;
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --glass-border-strong: rgba(255, 255, 255, 0.16);
+  /* 不支持 backdrop-filter 时的纯色兜底 */
+  --glass-bg-fallback: #101728;
+  --shadow-glass: 0 8px 32px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+
+  /* --- 科技强调色 --- */
+  --accent-cyan: #00f0ff;
+  --accent-purple: #8b5cf6;
+  --accent-green: #10b981;
+  /* 引用图里给"预印本"这类弱信号节点用：比 success 绿淡一档，避免和正向状态抢注意力 */
+  --accent-green-soft: #6ee7b7;
+  --accent-red: #ef4444;
+  --accent-amber: #f59e0b;
+
+  --accent-cyan-dim: rgba(0, 240, 255, 0.14);
+  --accent-cyan-line: rgba(0, 240, 255, 0.45);
+  --accent-purple-dim: rgba(139, 92, 246, 0.16);
+
+  /* --- 文本 --- */
+  --text-primary: #f3f4f6;
+  --text-secondary: #9ca3af;
+  --text-muted: #6b7280;
+
+  /* --- 描边 / 网格 --- */
+  --border-hairline: rgba(255, 255, 255, 0.07);
+  --grid-line: rgba(255, 255, 255, 0.035);
+  --grid-size: 44px;
+
+  /* --- 字体：只用本地字体栈，不依赖任何 CDN（离线 / 内网可用） --- */
+  --font-sans: "Inter", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+    system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "Roboto Mono", "JetBrains Mono", "SFMono-Regular",
+    "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+  --font-display: "Orbitron", "Eurostile", var(--font-mono);
+
+  /* --- 动效时长 --- */
+  --dur-fast: 140ms;
+  --dur-base: 240ms;
+  --dur-slow: 420ms;
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* --- 布局尺寸 --- */
+  --header-h: 60px;
+  --sidebar-w: 232px;
+  --sidebar-w-collapsed: 68px;
+  --radius-panel: 14px;
+}
+
+@layer base {
+  * {
+    border-color: var(--border-hairline);
+  }
+
+  html,
+  body {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--bg-base);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow: hidden;
+  }
+
+  /* 深空底色：中心略亮的径向渐变 */
+  #root {
+    position: relative;
+    height: 100vh;
+    background: radial-gradient(
+        120% 90% at 50% 0%,
+        var(--bg-raised) 0%,
+        var(--bg-base) 62%
+      )
+      fixed;
+  }
+
+  /* 静态点阵网格（极低透明度，不随内容滚动） */
+  #root::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background-image: linear-gradient(var(--grid-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+    background-size: var(--grid-size) var(--grid-size);
+    mask-image: radial-gradient(120% 100% at 50% 0%, #000 40%, transparent 100%);
+    z-index: 0;
+  }
+
+  /* 左上青 / 右下紫的微弱光晕 */
+  #root::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background: radial-gradient(
+        46% 46% at 8% 4%,
+        rgba(0, 240, 255, 0.1) 0%,
+        transparent 70%
+      ),
+      radial-gradient(46% 46% at 96% 96%, rgba(139, 92, 246, 0.12) 0%, transparent 70%);
+    z-index: 0;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-weight: 600;
+    /* 不给中文标题加负字距：CJK 字形会互相挤压，小字号下像被划了一道 */
+    letter-spacing: 0;
+  }
+
+  /* 数字一律等宽：避免 CountUp 跳动时列宽抖动 */
+  .tabular,
+  .font-mono,
+  .font-display {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 99px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--accent-cyan-line);
+  }
+
+  ::selection {
+    background: var(--accent-cyan-dim);
+    color: var(--text-primary);
+  }
+}
+
+@layer components {
+  /* ---------------------------------------------------------------- 玻璃面板 */
+  .glass {
+    background: linear-gradient(135deg, var(--glass-bg-start), var(--glass-bg-end));
+    border: 1px solid var(--glass-border);
+    box-shadow: var(--shadow-glass);
+    -webkit-backdrop-filter: blur(var(--glass-blur));
+    backdrop-filter: blur(var(--glass-blur));
+  }
+
+  /* 不支持 backdrop-filter（老浏览器 / 低性能设备）时退化成纯色，
+     否则半透明白叠在深色上会糊成一片，可读性直接崩掉 */
+  @supports not (
+    ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)))
+  ) {
+    .glass {
+      background: var(--glass-bg-fallback);
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+    }
+  }
+
+  .glass-hover {
+    transition: border-color var(--dur-base) var(--ease-out-expo),
+      transform var(--dur-base) var(--ease-out-expo),
+      box-shadow var(--dur-base) var(--ease-out-expo);
+  }
+  .glass-hover:hover {
+    border-color: var(--glass-border-strong);
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-glass), 0 0 0 1px var(--accent-cyan-dim),
+      0 12px 40px rgba(0, 0, 0, 0.5);
+  }
+
+  .panel {
+    border-radius: var(--radius-panel);
+  }
+
+  /* ---------------------------------------------------------------- 霓虹文本 */
+  .glow-cyan {
+    color: var(--accent-cyan);
+    text-shadow: 0 0 14px rgba(0, 240, 255, 0.45);
+  }
+  .glow-purple {
+    color: var(--accent-purple);
+    text-shadow: 0 0 14px rgba(139, 92, 246, 0.45);
+  }
+
+  .hairline-b {
+    border-bottom: 1px solid var(--border-hairline);
+  }
+
+  /* ---------------------------------------------------------------- 呼吸指示灯 */
+  .status-dot {
+    position: relative;
+    width: 7px;
+    height: 7px;
+    border-radius: 99px;
+    background: var(--accent-green);
+    box-shadow: 0 0 8px var(--accent-green);
+  }
+  .status-dot::after {
+    content: "";
+    position: absolute;
+    inset: -4px;
+    border-radius: 99px;
+    border: 1px solid var(--accent-green);
+    opacity: 0;
+    animation: breathe 2.4s ease-in-out infinite;
+  }
+  .status-dot.is-error {
+    background: var(--accent-red);
+    box-shadow: 0 0 8px var(--accent-red);
+  }
+  .status-dot.is-error::after {
+    border-color: var(--accent-red);
+  }
+  .status-dot.is-idle {
+    background: var(--text-muted);
+    box-shadow: none;
+  }
+  .status-dot.is-idle::after {
+    animation: none;
+  }
+}
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    scrollbar-width: none;
+  }
+}
+
+/* ------------------------------------------------------------------ 关键帧 */
+@keyframes breathe {
+  0% {
+    opacity: 0.7;
+    transform: scale(0.7);
+  }
+  70%,
+  100% {
+    opacity: 0;
+    transform: scale(1.6);
+  }
+}
+
+@keyframes scan {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

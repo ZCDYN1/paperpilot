@@ -25,6 +25,21 @@ prompt 里当然要写清楚，但**只在 prompt 里写是幼稚的**：
 ## 语料不足的降级
 `corpus_ready=False` 时，报告开头**显式声明检索覆盖度**。
 架构 §2.2：「不能让 Agent 在空索引上硬编答案」。
+
+## ★ 这里是 `token` 事件的真实发送点（架构 §8「LLM 输出增量」）
+前端 `useResearchStream.ts` 一直在消费 `token` 事件做打字机效果，但真实模式下从未收到过
+一条（只有 mock replay 里有），因为**全仓没有发送点**。现在由本节点补上：
+`text_invoke(..., on_delta=sink.feed)` 走底层 `llm.astream`，
+每个**真实生成出来的**增量经 LangGraph 的 `custom` 通道顶出图、立刻变成 SSE 帧
+（机制与"为什么不能走 `state["events"]`"见 `app/agents/nodes/_common.py` 的 `TokenSink`）。
+
+三条边界，别误会这个流的范围：
+1. 流的是**模型生成的正文**，不含下面程序追加的 ⚠️ 一节 / 参考文献 / 页脚 ——
+   把它们也吐成 `token` 就是"成稿切片假装流"，正是这次改动禁止的做法；
+   完整成稿一律走 `final_report` 事件（前端渲染报告也只认它）。
+2. 只给 write 开流式：plan/read/verify/compare 走 structured output，
+   增量是半截 JSON，没有合法的 token 流可言。
+3. 重试与流式的冲突按"**宁少流、不重流**"处置，见 `TokenSink` docstring。
 """
 
 from __future__ import annotations
@@ -32,11 +47,21 @@ from __future__ import annotations
 import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from app.agents.nodes._common import dedup_papers, merge_usage, node_event, text_invoke
+from app.agents.nodes._common import (
+    dedup_papers,
+    make_token_sink,
+    merge_usage,
+    node_event,
+    text_invoke,
+)
 from app.agents.prompts import load_prompt, render_papers_block
 from app.agents.state import STAGE_WRITTEN, Evidence, ResearchState
 
 logger = structlog.get_logger(__name__)
+
+# 事件里 `node` 字段的取值：与图上的节点名一致（`app/agents/graph.py` 的 `add_node("write", …)`），
+# 前端按它把增量归到 write 这一条流（`EventTimeline.tsx` 的 `collapseTokens` 也按 node 分段）。
+WRITE_NODE = "write"
 
 _FOOTER = "> 本文由 AI 生成，引用请以原文为准。"
 
@@ -144,11 +169,23 @@ async def write_node(state: ResearchState) -> dict:
     ]
 
     usage: dict[str, int] = {}
+    # ★ `token` 事件的发送点：`sink.feed` 收到的是 `llm.astream` 真实吐出来的增量。
+    # 不在流上下文里（单测直接调本节点 / 脚本跑 ainvoke）时 sink 全程静默，
+    # 返回值与流式与否无关 —— 所以"能不能流"永远不会影响"报告对不对"。
+    sink = make_token_sink(WRITE_NODE)
     try:
-        body, usage = await text_invoke(messages)
+        body, usage = await text_invoke(messages, on_delta=sink.feed, on_abort=sink.abort)
     except Exception as exc:  # noqa: BLE001 - 写作失败也要给用户"部分结果"（架构 §11 整体降级）
         logger.warning("write.llm_failed", error=str(exc)[:200])
         body = "（综述生成失败，以下为本次检索与抽取的结构化结果）"
+
+    logger.info(
+        "write.streamed",
+        node=WRITE_NODE,
+        streamed_chunks=sink.chunks_sent,
+        streamed_chars=sink.chars_sent,
+        discarded=sink.closed,
+    )
 
     unsupported = list((state.get("verification") or {}).get("unsupported") or [])
     # 兜底合并：verification.unsupported 正常就来自 `verified is False` 的那批引用

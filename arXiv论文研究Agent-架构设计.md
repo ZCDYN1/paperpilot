@@ -154,12 +154,14 @@ paperpilot/
 ├── app/
 │   ├── main.py                      # FastAPI 入口 + lifespan（加载模型/建索引连接）
 │   ├── api/
-│   │   ├── deps.py                  # 依赖注入：DB session / retriever / graph
+│   │   ├── guards.py                # 输入闸门：run_id / 文本 / 子问题列表
 │   │   └── v1/
-│   │       ├── research.py          # SSE 主接口
-│   │       ├── papers.py            # 语料管理
-│   │       ├── eval.py              # 评测触发
-│   │       └── health.py            # /healthz 健康检查
+│   │       ├── research.py          # SSE 主接口 + 运行列表 + 导出/时间线/追问
+│   │       ├── papers.py            # 语料分页、单篇深挖、上传、引用边、趋势
+│   │       ├── terms.py             # 术语标注与查询（F11）
+│   │       ├── stats.py             # 全局聚合指标（首页卡片 / 系统页）
+│   │       └── health.py            # /healthz 与 /resilience
+│   │       # eval.py（评测触发）仍是设计目标，未实现：现在走 scripts/run_eval.py
 │   ├── core/
 │   │   ├── config.py                # pydantic-settings，读 .env
 │   │   ├── logging.py               # structlog 结构化日志
@@ -167,7 +169,7 @@ paperpilot/
 │   │   └── resilience.py            # tenacity 重试策略 + 熔断器
 │   ├── db/
 │   │   ├── base.py                  # DeclarativeBase
-│   │   ├── models.py                # 12 张表
+│   │   ├── models.py                # 15 张表
 │   │   └── session.py               # async engine + sessionmaker
 │   ├── schemas/                     # Pydantic 模型（API 出入参 + Tool 入参）
 │   ├── retrieval/
@@ -600,10 +602,15 @@ RRF 只用**排名**：`Σ 1/(k + rank)`，量纲问题被彻底绕过，且对�
 | POST | `/api/v1/terms/unknown` | 批量问"哪些术语词表里没有"（F11） | ✅ |
 | GET | `/healthz` | 健康检查（含 FAISS 索引是否加载、模型是否就绪） | ✅ |
 | GET | `/resilience` | 熔断器实时状态（运维排查用） | ✅ |
+| GET | `/api/v1/research` | 最近的运行列表（带每次运行的引用数与支撑率）；界面靠它决定"展示哪一次研究" | ✅ |
+| GET | `/api/v1/papers` | 语料分页查询（标题/摘要 LIKE 过滤 + 分类过滤，每行带 `chunk_count` 与 `venue_tier`） | ✅ |
+| GET | `/api/v1/stats/overview` | 全局聚合指标（论文/分块/运行数、平均支撑率、按天 runs/tokens） | ✅ |
+| POST | `/api/v1/terms` | 与 GET 同一结果，但正文走请求体（整篇报告 4700+ 字符放不进 query） | ✅ |
 | POST | `/api/v1/papers/ingest` | 按 arxiv_id / 关键词批量入库建索引 | ⏳ 待实现（现在由 `ensure_corpus` 节点与 `scripts/build_index.py` 承担） |
-| GET | `/api/v1/papers` | 分页查询语料（支持 metadata 过滤） | ⏳ 待实现 |
 | POST | `/api/v1/eval/run` | 触发 RAGAS 评测（后台任务） | ⏳ 待实现（现在走 `scripts/run_eval.py`） |
-| GET | `/api/v1/metrics/tokens` | Token / 成本统计 | ⏳ 待实现（现在随 `GET /research/{run_id}` 返回） |
+
+> 原先列在"待实现"里的 `GET /api/v1/papers`（语料分页）与 `GET /api/v1/metrics/tokens`（成本统计）
+> 已分别由 `GET /papers` 与 `GET /stats/overview` 落地，故从表中移除。
 
 > 「实现状态」这一列是刻意加的：上面这张表最初是**设计目标**，不是清单快照。
 > 一张看起来都像已实现的表会让人照着写前端，然后在 404 上花掉半天。
@@ -676,6 +683,18 @@ async def research_stream(req: ResearchRequest):
 | `error` | 任何异常 | `node`, `code`, `message`, `recoverable` |
 | `done` | 流结束 | `run_id`, `status` |
 | `citation_rescue` | read / verify 各自完成引用定位后 | `node`(read\|verify), `checked`, `rescued`, `dropped`, `recovered_by{}`, `drop_reasons{}` |
+
+> **`token` 事件的实际实现（它曾经只有定义、没有发送点）**
+> 增量由 `write` 节点通过 LangGraph 的 **`custom` 流通道**顶出来（`stream_mode=["updates","custom"]`），
+> 所以 payload 就是 `{node: "write", delta}`，与前端已解析的键一致。三条边界要知道：
+> ① **只流模型生成的正文**——⚠️ 未支撑一节、参考文献、页脚是代码追加的，不进流，
+> 因此 `streamed` 拼起来 **不等于** `final_report.markdown`，权威内容永远以 `final_report` 为准；
+> ② 流式与重试的冲突按"**宁少流、不重流**"处置：一次尝试已经吐过字又失败时，
+> 发一条 `error{code: token_stream_aborted, recoverable: true}` 声明这段作废并关闭本次 sink，
+> 重试那一轮不再往外吐（重试/超时/熔断语义本身一字未改，包在整段生成之外）；
+> ③ `node_started(write)` 仍晚于第一个 token——`updates` 通道的固有顺序，
+> 前端不要把"节点开始"当成流式起点。
+> 真实模式下一次生成实测 800+ 条 token 事件，前端若逐条 `setState` 需要自己做批处理。
 
 > **`citation_rescue` 是第 16 种事件**，追加在末尾以不打乱上面 15 项与本文档的逐条对应关系。
 > 它把 `Resolution.how`（§10.1 的三条定位路径）与 verify 侧重锚的统计从后端日志搬到对外契约上：
@@ -906,7 +925,16 @@ provider/model/base_url/key 四项必须同改；`0.61`（18 条引用）与 `0.
 
 ---
 
-## 13. Streamlit 面板设计
+## 13. 交互界面
+
+**当前主界面是 `web/` 下的 React 控制台**（Vite + TS，深色 HUD 风格，覆盖 F1~F19）。
+它由后端同源挂载：`app/main.py::_mount_web_ui()` 在构建产物 `web/dist` 存在时把它挂成单端口前端
+（因此**不需要 CORS、不需要第二个 Node 服务、不需要第二个容器**），不存在则安静跳过、
+退回下面的 Streamlit 面板。构建：`cd web && npm ci && npm run build`。
+
+下面这一节描述的是 **`ui/streamlit_app.py` 的三栏面板**——它是控制台的先行版本，
+保留作轻量调试与"装不了 Node 的人也能看到界面"的兜底入口。两者的信息架构同源，
+所以这张布局图同时也是控制台各页的设计依据。
 
 三栏布局：
 

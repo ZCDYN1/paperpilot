@@ -26,6 +26,11 @@ UI_PORT = 8501
 API_URL = f"http://127.0.0.1:{API_PORT}"
 UI_URL = f"http://127.0.0.1:{UI_PORT}"
 
+# React 控制台构建过一次就由后端同源提供（`app/main.py` 的 `_mount_web_ui`），
+# 这时 :8000 就是完整产品，不必再拉一个 Streamlit。
+# 没构建过就退回 Streamlit 面板 —— 装不了 Node 的人不该因此连界面都看不到。
+WEB_INDEX = ROOT / "web" / "dist" / "index.html"
+
 _children: list[subprocess.Popen] = []
 
 
@@ -164,12 +169,16 @@ def main() -> int:
     _seed_sample_corpus_if_new()
 
     api_proc = ui_proc = None
+    use_web_ui = WEB_INDEX.is_file()
+    target_url = API_URL if use_web_ui else UI_URL
 
     # 已有实例在跑就不重复起：双击两次不该变成端口冲突
-    if _http_ok(f"{API_URL}/healthz") and _http_ok(f"{UI_URL}/_stcore/health"):
-        print("[i] 检测到 PaperPilot 已经在运行，直接为你打开面板。")
+    api_up = _http_ok(f"{API_URL}/healthz")
+    panel_up = use_web_ui or _http_ok(f"{UI_URL}/_stcore/health")
+    if api_up and panel_up:
+        print(f"[i] 检测到 PaperPilot 已经在运行，直接为你打开 {target_url} 。")
         print("    想重启请先关掉那个启动窗口。")
-        webbrowser.open(UI_URL)
+        webbrowser.open(target_url)
         time.sleep(1.0)
         return 0
 
@@ -190,31 +199,36 @@ def main() -> int:
     _print_health()
 
     print()
-    print("[2/4] 启动交互面板 ...")
-    ui_proc = _spawn(
-        [
-            sys.executable,
-            "-m",
-            "streamlit",
-            "run",
-            "ui/streamlit_app.py",
-            "--server.address",
-            "127.0.0.1",
-            "--server.port",
-            str(UI_PORT),
-            "--server.headless",
-            "true",
-        ]
-    )
-    if not _wait_http(f"{UI_URL}/_stcore/health", deadline=120):
-        print(f"[X] 面板没能在 120 秒内就绪（退出码 {ui_proc.poll()}）。")
-        _stop_all()
-        return 1
-    print(f"      ✓ http://127.0.0.1:{UI_PORT}")
+    if use_web_ui:
+        print("[2/4] 使用 React 控制台（已由后端同源提供，无需单独起面板）...")
+        print(f"      ✓ http://127.0.0.1:{API_PORT}")
+    else:
+        print("[2/4] 未找到 web/dist，启动 Streamlit 面板 ...")
+        print("      （想要 React 控制台： cd web && npm install && npm run build）")
+        ui_proc = _spawn(
+            [
+                sys.executable,
+                "-m",
+                "streamlit",
+                "run",
+                "ui/streamlit_app.py",
+                "--server.address",
+                "127.0.0.1",
+                "--server.port",
+                str(UI_PORT),
+                "--server.headless",
+                "true",
+            ]
+        )
+        if not _wait_http(f"{UI_URL}/_stcore/health", deadline=120):
+            print(f"[X] 面板没能在 120 秒内就绪（退出码 {ui_proc.poll()}）。")
+            _stop_all()
+            return 1
+        print(f"      ✓ http://127.0.0.1:{UI_PORT}")
 
     print()
     print("[3/4] 打开浏览器 ...")
-    webbrowser.open(UI_URL)
+    webbrowser.open(target_url)
     # 浏览器进程起来需要一点时间，太早退出会让首页空白
     time.sleep(1.5)
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.terms import annotate, lookup, unknown_terms
 
@@ -31,13 +31,43 @@ class TermList(BaseModel):
     terms: list[str] = Field(min_length=1, max_length=200)
 
 
-@router.get("", summary="标出文本里出现的术语（F11）")
-async def terms_annotate(text: str) -> dict[str, Any]:
-    """返回 `{terms: [{term, matched, start, end, explanation, category}]}`。
+class TermAnnotateBody(BaseModel):
+    """`POST /terms` 的请求体。
+
+    为什么要单独有 POST 这条路：要标注的是**整篇报告正文**（实测 4700+ 字符，中文
+    URL 编码后按 3 字节/字算会到 14KB 以上），放进 query 就撞上请求行长度限制。
+    GET 版本保留给命令行与测试用。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    text: str = Field(default="")
+
+    @field_validator("text")
+    @classmethod
+    def _check_text(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("text 不能为空")
+        if len(v) > _MAX_ANNOTATE_CHARS:
+            raise ValueError(f"一次最多标注 {_MAX_ANNOTATE_CHARS} 个字符")
+        return v
+
+
+def _annotate_payload(text: str) -> dict[str, Any]:
+    """返回 `{matches: [{term, matched, start, end, explanation, category}]}`。
 
     `start/end` 是字符偏移，前端据此加下划线；重叠的匹配只保留更长的那个
     （`cross-encoder reranking` 不会被拆成两个短词）。
+
+    键名用 `matches` 而不是 `terms`：`POST /terms/unknown` 的请求体里 `terms` 已经是
+    "术语字符串列表"，同一份 API 里让 `terms` 一会儿是 list[str] 一会儿是 list[obj]
+    会逼着调用方按端点区分类型。
     """
+    return {"matches": annotate(text)}
+
+
+@router.get("", summary="标出文本里出现的术语（F11）")
+async def terms_annotate(text: str) -> dict[str, Any]:
     if not text.strip():
         raise HTTPException(
             status_code=422,
@@ -52,7 +82,13 @@ async def terms_annotate(text: str) -> dict[str, Any]:
                 "reason": f"一次最多标注 {_MAX_ANNOTATE_CHARS} 个字符",
             },
         )
-    return {"terms": annotate(text)}
+    return _annotate_payload(text)
+
+
+@router.post("", summary="标出文本里出现的术语（F11，正文较长时用这条）")
+async def terms_annotate_post(body: TermAnnotateBody) -> dict[str, Any]:
+    """与 GET 同一份结果，只是文本走请求体。校验失败由 pydantic 直接给 422。"""
+    return _annotate_payload(body.text)
 
 
 @router.post("/unknown", summary="批量查哪些术语词表里没有（F11）")

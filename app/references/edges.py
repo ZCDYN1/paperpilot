@@ -85,13 +85,19 @@ async def build_reference_edges(
                 citing_wid, refs = found
                 stats["works_found"] += 1
                 resolved = await client.resolve_arxiv_ids(refs)
-                stats["refs_unresolved"] += sum(1 for r in refs if not resolved.get(r, {}).get("arxiv_id"))
-                stats["edges_new"] += await _persist_edges(
+                # ⚠️ 必须是**本篇自己的**未解析数：下面 `edges_known` 要拿它减本篇的
+                # `len(refs)`，用累计值相减会在几篇之后变成负数并一路累加
+                # （实测 24 篇跑完报出 `edges_known: -292`）。
+                unresolved_here = sum(1 for r in refs if not resolved.get(r, {}).get("arxiv_id"))
+                stats["refs_unresolved"] += unresolved_here
+                new_here = await _persist_edges(
                     citing_arxiv_id=arxiv_id,
                     citing_openalex_id=citing_wid,
                     resolved=resolved,
                 )
-                stats["edges_known"] += len(refs) - stats["refs_unresolved"]
+                stats["edges_new"] += new_here
+                # 解析出了 arXiv id 但边早就在库里 = "已知"，即本轮没有新增的那部分
+                stats["edges_known"] += max(0, len(refs) - unresolved_here - new_here)
             except Exception as exc:  # noqa: BLE001 - 单篇失败不连坐整批
                 stats["errors"] += 1
                 logger.warning("references.edge_failed", arxiv_id=arxiv_id, error=str(exc)[:200])

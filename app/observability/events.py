@@ -11,6 +11,13 @@ SSE 协议**一旦上线就是对外契约**：Streamlit 面板、未来的 Reac
 - `interrupted`：HITL 中断时**必须**补发。否则前端只看到流"卡住不动"，
   用户以为程序死了（架构 §7 的必踩坑②）。
 - `token`：增量文本。前端靠它做打字机效果，而不是等整段返回再一次性渲染。
+  ⚠️ 它的**实时性**要求它不能走 `state["events"]` 那条路 —— 那条路要等节点跑完才
+  随 chunk 落地，几百条增量会全部憋到生成结束才一起出现（等于没流式）。
+  真实发送点在 `app/agents/nodes/writer.py`：write 节点把 `llm.astream` 的每个增量
+  经 LangGraph 的 `custom` 通道（`get_stream_writer()`）直接顶出图，
+  `stream()` 收到 `("custom", payload)` 就立刻翻成 SSE 帧。payload 形状照架构 §8：
+  `{"node": "write", "delta": "…"}`（字段名以 `web/src/api/events.ts` +
+  `useResearchStream.ts` 已在消费的 `node`/`delta` 为准，不新增字段）。
 """
 
 from __future__ import annotations
@@ -53,6 +60,10 @@ EVENT_TYPES: tuple[str, ...] = (
 )
 
 _EVENT_TYPE_SET = frozenset(EVENT_TYPES)
+
+# `stream()` 向 LangGraph 要的两种流模式（含义见 `SSEEmitter.stream` 的 docstring）。
+# 元组而不是裸字面量：想让 `stream()` 少一个模式时只改这一行。
+STREAM_MODES: tuple[str, ...] = ("updates", "custom")
 
 # ---------------------------------------------------------------------------
 # "带外事件"（out-of-band）：当前 SSE 流绑定 + 侧信道队列
@@ -141,15 +152,31 @@ def event_from_state(raw: dict[str, Any]) -> SSEEvent:
     return SSEEvent(type=etype, data=payload)
 
 
+def _split_stream_chunk(chunk: Any) -> tuple[str, Any]:
+    """把 `graph.astream` 的一个 chunk 归一成 `(stream_mode, payload)`。
+
+    `stream_mode` 传**列表**时 LangGraph 给的是 `(mode, payload)` 二元组；
+    传单个字符串（以及测试里的假图）时给的是裸 dict。两种都收：
+    这里若按"一定是元组"来写，退化症状是整条 SSE 流在第一个 chunk 上抛
+    `ValueError: not enough values to unpack` —— 一个协议适配函数把一次成功的运行变成 500。
+    """
+    if isinstance(chunk, tuple) and len(chunk) == 2 and isinstance(chunk[0], str):
+        return chunk[0], chunk[1]
+    return "updates", chunk
+
+
 class SSEEmitter:
     """事件发射器。
 
-    同时支持两种用法：
+    同时支持三种用法：
     1. **节点主动发**：节点把事件 dict 放进 `state["events"]`（见 `app/agents/state.py`），
        由 `drain_state_events` 取出。好处是节点签名保持 `(state) -> dict`，
        不依赖任何 emitter 实例，单测时不用 mock 网络层。
     2. **编排层流式发**：`stream()` 包住 `graph.astream`，把状态更新翻译成
        `node_started` / `plan_created` / `interrupted` 等框架级事件。
+    3. **节点内部实时发**：节点在执行过程中经 LangGraph 的 `custom` 通道顶事件
+       （目前只有 `token` 增量与它的作废通知 `error`，见 `app/agents/nodes/_common.py`
+       的 `TokenSink`）。与 1 的区别只有一个但很关键：**1 要等节点跑完才落地，3 立刻落地**。
     """
 
     def __init__(self, run_id: str = "", *, schema_version: str = SCHEMA_VERSION) -> None:
@@ -271,6 +298,14 @@ class SSEEmitter:
         return self.emit("thought", node=node, delta=delta)
 
     def token(self, node: str, delta: str) -> SSEEvent:
+        """`token` 事件的字段定义处：`{"node", "delta"}`（架构 §8，前端打字机就吃这两个键）。
+
+        ⚠️ **真实发送点**：`app/agents/nodes/writer.py` 的 write 节点在生成过程中
+        经 `TokenSink` 把每个增量送上图的 `custom` 通道 → `stream()` 调 `live_event()`
+        → 落到这里构造帧。所以增量是**生成出来的**，不是把成稿切片后假装是流。
+        走 `state["events"]` 发不了实时增量（要等节点跑完才随 chunk 落地），
+        这也是 `live_event()` 必须存在的原因。
+        """
         return self.emit("token", node=node, delta=delta)
 
     def verification(
@@ -347,6 +382,48 @@ class SSEEmitter:
             drop_reasons=drop_reasons or {},
         )
 
+    # ------------------------------------------------------- 节点内部的实时事件
+    def live_event(self, payload: Any) -> SSEEvent | None:
+        """把节点经 `custom` 通道顶上来的增量翻成事件（`stream()` 收到就当场发走）。
+
+        payload 约定与 `state["events"]` 一致：`{"type": "...", **data}`
+        （节点侧构造函数见 `app/agents/nodes/_common.py` 的 `node_event` + `TokenSink`）。
+
+        ## 为什么绕道便捷方法，而不是照 payload 直接构造事件
+        **字段形状必须在协议模块里只有一份定义。** 实时路径自己拼一遍 `{node, delta}`、
+        便捷方法再拼一遍，改一处漏一处的结果就是前端按老字段名解析、增量静默消失
+        （`token` 的 `node`/`delta` 已经是前端 `useResearchStream.ts` 在消费的契约）。
+        payload 里的键只是**输入**，最终写进帧的字段由 `token()` / `error()` 说了算。
+
+        ## 只认这两种类型，其余一律丢掉（不抛错）
+        `custom` 通道是节点直接往对外协议上写的口子，未知类型放行等于给事件契约开后门；
+        但这里抛错会打断一次**正在生成中的**报告（几十秒的 token 白烧），
+        代价远大于"少一条进度"。所以：未知/不支持的类型记 warning 后丢弃。
+        """
+        if not isinstance(payload, dict):
+            logger.debug("sse.custom_payload_ignored", payload_type=type(payload).__name__)
+            return None
+        etype = payload.get("type")
+        data = {k: v for k, v in payload.items() if k != "type"}
+        if etype == "token":
+            ev = self.token(str(data.get("node") or ""), str(data.get("delta") or ""))
+        elif etype == "error":
+            ev = self.error(
+                str(data.get("node") or ""),
+                str(data.get("code") or "unknown"),
+                str(data.get("message") or ""),
+                recoverable=bool(data.get("recoverable", True)),
+            )
+        else:
+            logger.warning("sse.custom_event_unsupported", event_type=str(etype)[:60])
+            return None
+        # 便捷方法会把事件同时记进 `_buffer`（与 `node_started` 等一致）。
+        # 实时增量动辄上千条，留在 buffer 里除了占内存没有任何用途（`stream()` 不 drain 它），
+        # 所以取走即清 —— 与 `emit_out_of_band` 同样的处理。
+        if self._buffer and self._buffer[-1] is ev:
+            self._buffer.pop()
+        return ev
+
     # ------------------------------------------------------------- 图级流式
     async def stream(
         self,
@@ -361,9 +438,15 @@ class SSEEmitter:
         `inputs=None` 表示**从中断点恢复**（HITL），这是 LangGraph 的约定，
         与"新起一次运行"必须区分 —— 传空 dict 会从 START 重跑，白烧一遍 token。
 
-        只消费 `stream_mode="updates"`：每个 chunk 是 `{节点名: 该节点返回的增量}`。
+        ## 为什么是 `["updates", "custom"]` 两种模式（`token` 事件的实时性靠这里落地）
+        - `updates`：每个 chunk 是 `{节点名: 该节点返回的增量}`，**节点跑完才给**。
+          框架级事件（`node_started` / `plan_created` / `interrupted`）与节点塞进
+          `state["events"]` 的事件都从这条路出来，够用。
+        - `custom`：节点执行**过程中**用 `get_stream_writer()` 写上来的东西，写入即到达。
+          `token` 增量必须走这条：走 `updates` 的话它们要等 write 节点整个跑完才落地，
+          用户看到的是"卡半分钟然后整篇出现"，打字机效果等于没做。
         用 `values` 模式会每个超级步吐一份**全量** state（含所有 chunk 全文），
-        在 20+ 篇论文的规模下会把带宽打满。
+        在 20+ 篇论文的规模下会把带宽打满，所以不碰。
         """
         if not resume:
             # ⚠️ 必须 `yield` 出去，不能只 `emit`。
@@ -377,40 +460,55 @@ class SSEEmitter:
         token = bind_emitter(self)
         interrupted: dict[str, Any] | None = None
         try:
-            async for chunk in graph.astream(inputs, config, stream_mode="updates"):
-                # 中断信号：LangGraph 把它放在 `__interrupt__` 键下
-                if "__interrupt__" in chunk:
-                    interrupted = {"node": "interrupt"}
-                    # ⚠️ 中断时必须**补发一个 interrupted 事件**，否则前端只看到流"卡住不动"，
-                    # 用户会以为程序死了（架构 §7 必踩坑②）。
-                    # payload 里带上**当前 state 的子问题**，前端才能立刻渲染"编辑子问题"面板 ——
-                    # 只报"中断了"而不给可编辑内容，等于没实现 HITL。
-                    payload: Any = None
-                    try:
-                        snapshot = await graph.aget_state(config)
-                        values = getattr(snapshot, "values", None) or {}
-                        payload = {
-                            "sub_questions": values.get("sub_questions"),
-                            "stage": values.get("stage"),
-                        }
-                    except Exception as exc:  # noqa: BLE001 - 拿不到 state 不该让流断掉
-                        logger.warning("sse.interrupt_state_unavailable", error=str(exc)[:200])
-                    yield self.interrupted(
-                        at="after_plan",
-                        reason="用户在拆解后可编辑子问题",
-                        payload=payload,
-                    ).to_sse()
-                else:
+            async for raw in graph.astream(inputs, config, stream_mode=list(STREAM_MODES)):
+                mode, chunk = _split_stream_chunk(raw)
+
+                # ---- 节点内部顶上来的增量：`token`（以及它的作废通知 `error`）----
+                # 放在 `updates` 分支之前、并且**照常 drain 一次侧信道**：
+                # 熔断/降级事件能在长生成的中途落地，而不是等节点跑完才补发。
+                if mode == "custom":
+                    ev = self.live_event(chunk)
+                    if ev is not None:
+                        yield ev.to_sse()
+                    for oob in self.drain_out_of_band():
+                        yield oob.to_sse()
+                    continue
+
+                if "__interrupt__" not in chunk:
                     for node_name, update in chunk.items():
                         yield self.node_started(node_name).to_sse()
                         if isinstance(update, dict):
                             for ev in self.drain_state_events(update):
                                 yield ev.to_sse()
+                    # 每个 chunk 之后清一次侧信道：容错/安全层投喂的事件在这里落地。
+                    # 放在 chunk 末尾（而不是每个事件都判断）能让"降级"紧跟在它发生的那一步之后出现。
+                    for oob in self.drain_out_of_band():
+                        yield oob.to_sse()
+                    continue
 
-                # 每个 chunk 之后清一次侧信道：容错/安全层投喂的事件在这里落地。
-                # 放在 chunk 末尾（而不是每个事件都判断）能让"降级"紧跟在它发生的那一步之后出现。
-                for ev in self.drain_out_of_band():
-                    yield ev.to_sse()
+                # 中断信号：LangGraph 把它放在 `__interrupt__` 键下
+                interrupted = {"node": "interrupt"}
+                # ⚠️ 中断时必须**补发一个 interrupted 事件**，否则前端只看到流"卡住不动"，
+                # 用户会以为程序死了（架构 §7 必踩坑②）。
+                # payload 里带上**当前 state 的子问题**，前端才能立刻渲染"编辑子问题"面板 ——
+                # 只报"中断了"而不给可编辑内容，等于没实现 HITL。
+                payload: Any = None
+                try:
+                    snapshot = await graph.aget_state(config)
+                    values = getattr(snapshot, "values", None) or {}
+                    payload = {
+                        "sub_questions": values.get("sub_questions"),
+                        "stage": values.get("stage"),
+                    }
+                except Exception as exc:  # noqa: BLE001 - 拿不到 state 不该让流断掉
+                    logger.warning("sse.interrupt_state_unavailable", error=str(exc)[:200])
+                yield self.interrupted(
+                    at="after_plan",
+                    reason="用户在拆解后可编辑子问题",
+                    payload=payload,
+                ).to_sse()
+                for oob in self.drain_out_of_band():
+                    yield oob.to_sse()
         finally:
             unbind_emitter(token)
 

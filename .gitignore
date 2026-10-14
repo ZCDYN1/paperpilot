@@ -14,6 +14,12 @@ env/
 .env
 .env.*
 !.env.example
+# web/ 的两份是**公共默认值**（只有 VITE_USE_MOCK / VITE_API_BASE 这类，没有任何密钥），
+# 必须提交：`.env.*` 会连它们一起忽略，而 `web/src/config/env.ts` 的 mock 开关
+# 一旦读不到 .env.production，构建出来的前端就全是内置演示数据 ——
+# 界面看起来完全正常，只有 clone 的人才会发现没有一条是真数据。
+!web/.env.development
+!web/.env.production
 
 # ---------- 运行期数据：索引 / SQLite / checkpoint（体积大，且可重建）----------
 data/

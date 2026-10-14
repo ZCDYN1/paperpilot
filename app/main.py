@@ -13,12 +13,15 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api.v1 import health, papers, research, terms
+from app.api.v1 import health, papers, research, stats, terms
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.core.resilience import BREAKER_HTTP, BREAKER_LLM, get_breaker
@@ -83,6 +86,37 @@ async def lifespan(app: FastAPI):
     logger.info("paperpilot.stopped")
 
 
+def _mount_web_ui(app: FastAPI) -> bool:
+    """把 `web/dist` 挂成单端口前端；没构建过就安静地跳过。
+
+    ★ 为什么要挂在这里而不是让前端单独跑一个 Node 服务：
+    同源之后**不需要 CORS、不需要第二个端口、不需要第二个容器**，
+    别人 clone 下来 `npm run build` 一次，之后 `启动PaperPilot.bat` 就是完整产品。
+    没构建时也不报错 —— 后端 API 与 Streamlit 面板照常可用。
+
+    路由顺序是关键：本函数在 `include_router` **之后**调用，所以 `/api/v1/*`、
+    `/healthz`、`/docs` 都会先匹配到；兜底路由再把其余 GET 交给 SPA。
+    """
+    dist = Path(__file__).resolve().parents[1] / "web" / "dist"
+    index = dist / "index.html"
+    if not index.is_file():
+        return False
+
+    assets = dist / "assets"
+    if assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(assets)), name="web-assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa(full_path: str) -> FileResponse:
+        # 兜底不能吞掉 API：否则拼错的接口路径会返回 200 + 一坨 HTML，
+        # 前端 `resp.json()` 报"解析失败"，真实原因（404）被彻底盖住。
+        if full_path.startswith(("api/", "docs", "redoc")) or full_path == "healthz":
+            raise HTTPException(status_code=404, detail="not found")
+        return FileResponse(index)
+
+    return True
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
     settings.ensure_dirs()
@@ -100,6 +134,16 @@ def create_app() -> FastAPI:
     app.include_router(research.router, prefix="/api/v1")
     app.include_router(papers.router, prefix="/api/v1")
     app.include_router(terms.router, prefix="/api/v1")
+    app.include_router(stats.router, prefix="/api/v1")
+
+    # 前端挂载必须排在所有 API 路由之后（见 _mount_web_ui 的路由顺序说明）
+    if _mount_web_ui(app):
+        logger.info("paperpilot.web_ui_mounted", hint="打开 http://127.0.0.1:8000 即为 React 控制台")
+    else:
+        logger.info(
+            "paperpilot.web_ui_missing",
+            hint="未找到 web/dist。构建： cd web && npm install && npm run build",
+        )
 
     return app
 

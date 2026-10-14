@@ -22,3 +22,18 @@ logs/
 !.env.example
 .idea/
 .vscode/
+
+# ---- React 控制台（Dockerfile webbuild 阶段自行在容器内构建）----
+# 必须排除：① node_modules（本机 114 个包、几百 MB，走 COPY . . 会塞进 api 镜像）；
+#          ② web/dist（宿主机产物混进容器会让"构建过的镜像"和 compose 内构建结果对不上，
+#             且过期 dist 会被 _mount_web_ui 直接挂出去）。
+web/node_modules/
+web/dist/
+web/coverage/
+# vite 只从 web/ 目录的 .env* 读 VITE_*；宿主机本地配置不该影响容器里
+# base/产物路径（.dockerignore 的 * 不跨 /，根部的 .env.* 匹配不到 web/ 下的文件）
+web/.env*
+!web/.env.example
+**/node_modules/
+npm-debug.log*
+yarn-error.log*

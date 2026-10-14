@@ -60,9 +60,19 @@ docker compose build --build-arg INSTALL_LOCAL=true && docker compose up
 > `INSTALL_LOCAL=true` 的构建，否则容器里没有 FlagEmbedding，检索会明确报错
 > （报错信息里就写着该跑哪条命令，不会静默变差）。
 
+- **React 控制台：http://localhost:8000** （`web/dist` 在镜像构建阶段产出、由后端同源挂载，
+  所以只有一个端口、不需要 CORS、也不需要第二个容器）
 - API 文档：http://localhost:8000/docs
 - 健康检查：http://localhost:8000/healthz
-- 交互面板：http://localhost:8501
+
+旧的 Streamlit 面板（:8501）现在挂在 compose 的 `legacy-ui` profile 下，**默认不启动**：
+
+```bash
+docker compose --profile legacy-ui up -d ui     # 或 make docker-up-legacy
+```
+
+它是控制台的先行版本，留作对照原始 agent 输出、排查后端问题时用。
+停止时也要带上 profile，否则 compose 不会停 profile 里的容器：`make docker-down` 已经带了。
 
 ### 方式二：本地运行
 
@@ -78,9 +88,25 @@ pip install -e ".[local]"        # 可选：本地 BGE（含 torch，较大）
 
 cp .env.example .env             # 然后编辑 .env
 python scripts/load_sample_data.py   # 导入离线样例语料（24 篇，零联网）
-uvicorn app.main:app --reload    # 起后端 :8000
-streamlit run ui/streamlit_app.py  # 另开一个终端起面板 :8501
+
+# 前端控制台：构建一次，之后由后端同源提供（不需要第二个端口，也不需要 CORS）
+cd web && npm ci && npm run build && cd ..
+
+uvicorn app.main:app --reload    # 打开 http://127.0.0.1:8000 就是 React 控制台
 ```
+
+开发前端时不必每次重新构建：`cd web && npm run dev` 起 :5173（Vite 代理到 :8000）。
+`web/.env.development` 默认 `VITE_USE_MOCK=1`，即**没有 Python 后端也能浏览全部界面**；
+连真后端调试时在 `web/.env.local` 里写 `VITE_USE_MOCK=0`。
+生产构建读 `web/.env.production`（`VITE_USE_MOCK=0`），而代码级默认同样是"走真实后端"——
+mock 只能被显式打开，否则一次读不到 env 文件的构建就会静默产出一份全是演示数据的前端。
+
+> **用 uv 也行**（仓库里的 `uv.lock` 锁定了这套解析结果）：
+> `uv venv --python 3.12 && uv sync --extra dev`（要本地 BGE 再加 `--extra local`）。
+> 注意 `dev` 定义在 `[project.optional-dependencies]` 而不是 PEP 735 的
+> `dependency-groups`，所以**裸 `uv sync` 不会装 pytest / ruff**，必须显式 `--extra dev`。
+> README、Makefile 与 CI 仍以 `pip install -e` 为准；改了 `pyproject.toml` 后
+> 用 `uv lock` 刷新、`uv lock --check` 校验一致性。
 
 **只想先确认链路是通的**（不填 key、不联网、不下模型）：
 
@@ -154,12 +180,14 @@ Streamlit 面板只是其中一种客户端，下面这些是对外契约（`htt
 |---|---|---|
 | POST | `/api/v1/research/stream` | 发起一次研究，`text/event-stream` 流式推进程；跑到拆解后停在中断点 A |
 | POST | `/api/v1/research/{run_id}/resume` | 从中断点 A 继续（可带被用户改过的子问题） |
+| GET | `/api/v1/research?limit=&offset=&status=` | 最近的运行列表（带每次运行的引用数与支撑率；界面上"看哪一次报告"靠它选） |
 | GET | `/api/v1/research/{run_id}` | run 状态、报告正文、对比表、引用、token 用量 |
 | GET | `/api/v1/research/{run_id}/citations` | 引用证据链（含章节定位与证据强度） |
 | GET | `/api/v1/research/{run_id}/export.md` | 导出 Markdown 报告（F8） |
 | GET | `/api/v1/research/{run_id}/related-work.md` | 导出「相关工作」章节草稿，按方法分组（F18） |
 | GET | `/api/v1/research/{run_id}/timeline` | 方法演进时间线（F12；没建引用边时 `addresses_gap` 恒为空） |
 | POST | `/api/v1/research/{run_id}/followup` | **基于这次研究已读且已校验的证据**追问，不重新检索（F9） |
+| GET | `/api/v1/papers?limit=&offset=&q=&category=` | 语料分页查询（标题/摘要 LIKE 过滤；每行带 `chunk_count` 与 `venue_tier`） |
 | GET | `/api/v1/papers/{arxiv_id}` | 单篇详情：元数据 + 章节级 chunk + 该篇历史引用（F13） |
 | POST | `/api/v1/papers/{arxiv_id}/ask` | 只在这一篇的内容上问答，取不到支撑就明说（F13） |
 | POST | `/api/v1/papers/upload` | 上传自己的 PDF / TXT / MD 入库（F15；PDF 需 `pip install -e ".[pdf]"`） |
@@ -448,10 +476,11 @@ python -c "import sqlite3;print(sqlite3.connect('data/sqlite/paperpilot.db').exe
 | F19 质量信号 | 分档是人工白名单（判不准就 `preprint`/`unknown`）；趋势需要**多天**采样，只调一次接口拿不到趋势 |
 | F9 追问 | 复用不了已校验证据时返回 `no_evidence`，不会悄悄退化成一次全量研究 |
 
-**还没有对外接口的部分**：语料分页查询（`GET /api/v1/papers`）、评测触发（`/api/v1/eval/run`）、
-独立的成本统计接口 —— 这三件目前分别由 `scripts/load_sample_data.py`、`scripts/run_eval.py`
-和 `GET /api/v1/research/{run_id}` 的 `token_usage` 字段承担。
-另外**Streamlit 面板只接到 F1~F10 那一批**：上面表格里的新接口在界面上还没有控件。
+**还没有对外接口的部分**：评测触发（`/api/v1/eval/run`）—— 目前由 `scripts/run_eval.py` 承担。
+（原先同处列出的"语料分页查询"与"独立的成本统计接口"已补上，分别是
+`GET /api/v1/papers` 与 `GET /api/v1/stats/overview`。）
+另外 **React 控制台（`web/`）已覆盖 F1~F19 的界面**；`ui/` 下的 Streamlit 面板是它的先行版本，
+保留作轻量调试入口。
 
 ---
 
@@ -468,8 +497,18 @@ arXiv论文研究Agent/
 │   ├── ingest/              # arXiv / OpenAlex 客户端与入库流水线
 │   ├── memory/              # 短期记忆 + 向量长期记忆
 │   ├── observability/       # 追踪 / Token 计量 / SSE 事件发射
-│   └── eval/                # RAGAS 评测与消融实验
-├── ui/streamlit_app.py      # 交互面板
+│   ├── eval/                # RAGAS 评测与消融实验
+│   ├── export/              # 服务端渲染 Markdown 报告与「相关工作」草稿
+│   ├── papers/              # 单篇详情与单篇深挖问答
+│   ├── references/          # 引用边（OpenAlex referenced_works）与被引趋势
+│   ├── analysis/            # 方法演进时间线、会议/期刊分档
+│   ├── terms/               # 术语词表与文本标注
+│   ├── followup/            # 基于已校验证据的追问（不重新检索）
+│   └── api/v1/              # research / papers / terms / stats / health
+├── web/                     # React 控制台（Vite + TS，主界面；构建后由 :8000 同源提供）
+│   ├── src/api/             # 后端契约的 TS 镜像 + 契约测试（打真实后端）
+│   └── src/pages/           # 控制台 / 报告 / 会话 / 论文库 / 分析 / 系统
+├── ui/streamlit_app.py      # Streamlit 面板（控制台的先行版本，保留作调试入口）
 ├── tests/                   # 单元测试
 ├── sample_data/corpus.json  # 24 篇真实 arXiv 论文的摘要级语料（83KB），零 key 零联网起步
 ├── Dockerfile / Dockerfile.ui / docker-compose.yml / Makefile

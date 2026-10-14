@@ -1,7 +1,7 @@
 # PaperPilot — 常用命令速查
 # 说明：Windows 上如果没有 make，可直接照抄下面的命令手动执行（或用 scripts/ 下的脚本）。
 
-.PHONY: help install install-local dev-api dev-ui test lint fmt typecheck ablate eval eval-ablation eval-ragas index sample zerokey spotcheck spotcheck-stats docker-build docker-up docker-down clean
+.PHONY: help install install-local dev-api dev-ui web-install web-dev web-build web-typecheck test lint fmt typecheck ablate eval eval-ablation eval-ragas index sample zerokey spotcheck spotcheck-stats docker-build docker-up docker-up-legacy docker-down clean
 
 help:
 	@echo "PaperPilot 常用命令："
@@ -9,6 +9,9 @@ help:
 	@echo "  make install-local  额外安装本地 BGE 依赖（含 torch，体积较大）"
 	@echo "  make dev-api        启动 FastAPI（热重载，:8000）"
 	@echo "  make dev-ui         启动 Streamlit 面板（:8501）"
+	@echo "  make web-install    安装 React 控制台依赖（一次性）"
+	@echo "  make web-dev        控制台开发模式（:5173，热更新）"
+	@echo "  make web-build      构建控制台到 web/dist，之后由 :8000 同源提供"
 	@echo "  make test           运行单元测试"
 	@echo "  make lint           代码检查（ruff）"
 	@echo "  make fmt            自动格式化（ruff format）"
@@ -22,9 +25,10 @@ help:
 	@echo "  make zerokey        零 key 冷启动：样例语料 + mock provider 起服务"
 	@echo "  make spotcheck      导出引用人工抽检 CSV（逐条填 human_verdict）"
 	@echo "  make spotcheck-stats 用已填好的 CSV 出人工口径准确率"
-	@echo "  make docker-build   构建镜像"
-	@echo "  make docker-up      用 docker compose 起全栈"
-	@echo "  make docker-down    停掉并清理容器与 volume"
+	@echo "  make docker-build   构建镜像（默认不含旧 Streamlit 面板）"
+	@echo "  make docker-up      docker compose 起全栈，界面即 http://localhost:8000 React 控制台"
+	@echo "  make docker-up-legacy 额外起旧 Streamlit 面板（调试入口，:8501）"
+	@echo "  make docker-down    停掉并清理容器与 volume（含 legacy profile）"
 	@echo "  make clean          清理运行期数据与各类缓存"
 
 install:
@@ -38,6 +42,19 @@ dev-api:
 
 dev-ui:
 	streamlit run ui/streamlit_app.py
+
+# React 控制台：装一次依赖、构建一次，之后 :8000 就是完整产品（同源，无需 CORS）
+web-install:
+	cd web && npm install
+
+web-dev:
+	cd web && npm run dev
+
+web-build:
+	cd web && npm run build
+
+web-typecheck:
+	cd web && npm run typecheck
 
 test:
 	pytest -q
@@ -93,14 +110,22 @@ spotcheck:
 spotcheck-stats:
 	python scripts/spotcheck_citations.py --from-csv eval_results/citation_spotcheck.csv
 
+# docker-build 默认跳过 ui 服务（它在 legacy-ui profile 下），只构建 api 镜像，
+# api 镜像已内含 React 控制台产物（Dockerfile 的 webbuild 阶段）。
 docker-build:
 	docker compose build
 
 docker-up:
 	docker compose up --build
 
+# 旧 Streamlit 面板：显式带 profile 才会被构建/启动
+docker-up-legacy:
+	docker compose --profile legacy-ui up -d ui
+
+# down 也带 profile：compose 默认不会停 profile 服务里的容器，
+# 不带 --profile 时 legacy-ui 起的面板会漏杀；volume 清理同理需显式。
 docker-down:
-	docker compose down -v
+	docker compose --profile legacy-ui down -v
 
 clean:
 	rm -rf data/ .pytest_cache .ruff_cache .mypy_cache

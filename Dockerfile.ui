@@ -1,5 +1,8 @@
 # =============================================================================
-# PaperPilot Streamlit 面板镜像
+# PaperPilot Streamlit 面板镜像 ——【旧面板 / 调试入口】
+# 产品界面现在是 api 镜像内置的 React 控制台（http://localhost:8000 同源直出）。
+# 本镜像仅在 compose `--profile legacy-ui` 时构建/启动，用于对照原始 agent 输出、
+# 排查后端问题；docker compose up 默认不会起它。
 # UI 侧只依赖 streamlit + requests，不需要 torch / faiss，所以镜像可以做得很小
 # =============================================================================
 FROM python:3.12-slim

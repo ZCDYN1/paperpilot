@@ -23,11 +23,14 @@ from __future__ import annotations
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
+from sqlalchemy import func, or_, select
 
 from app.analysis.venue_tiers import lookup as lookup_tier
 from app.api.guards import guard_run_id, guard_text
+from app.db.models import Paper, PaperChunk
+from app.db.session import session_scope
 from app.ingest.pdf import (
     EmptyDocumentError,
     EncryptedDocumentError,
@@ -115,6 +118,90 @@ async def venue_tier(venue: str, comment: str | None = None) -> dict[str, Any]:
     README、导出、测试都锁着，加一列等于同时改三处契约。
     """
     return lookup_tier(venue, comment=comment)
+
+
+# --------------------------------------------------------------------------- 论文列表
+ESCAPE = "\\"
+
+
+def _like_pattern(q: str) -> str:
+    """把用户输入包成 LIKE 模式，并转义 `%` `_` 与转义符本身。
+
+    不转义的话输入一个 `%` 就静默变成"匹配全部"，看起来像搜索坏了。
+    """
+    escaped = q.replace(ESCAPE, ESCAPE * 2).replace("%", ESCAPE + "%").replace("_", ESCAPE + "_")
+    return f"%{escaped}%"
+
+
+@router.get("", summary="语料库论文列表（分页 + 关键词过滤）")
+async def list_papers(
+    limit: int = Query(default=20, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    q: str | None = Query(default=None, max_length=200, description="标题/摘要关键词"),
+    category: str | None = Query(default=None, max_length=16),
+) -> dict[str, Any]:
+    """前端「论文库」页的数据源。
+
+    之前只有 `GET /papers/{arxiv_id}`，等于要求调用方**先知道 id 才能查到东西** ——
+    列表页、定向对比、上传后的回显全都没有数据来源。
+
+    `q` 走 SQL `LIKE` 而不是全文检索：这一层只是"在已入库的几十篇里找一篇"，
+    真正的语义检索在 `app/retrieval/`，把两套东西混在一个接口里迟早互相拖累。
+    """
+    conds = []
+    if q:
+        conds.append(or_(Paper.title.ilike(_like_pattern(q), escape=ESCAPE), Paper.abstract.ilike(_like_pattern(q), escape=ESCAPE)))
+    if category:
+        conds.append(Paper.primary_category == category)
+
+    async with session_scope() as db:
+        total = (
+            await db.execute(select(func.count()).select_from(Paper).where(*conds))
+        ).scalar_one()
+
+        papers = (
+            (
+                await db.execute(
+                    select(Paper).where(*conds).order_by(Paper.arxiv_id.desc()).limit(limit).offset(offset)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        ids = [p.arxiv_id for p in papers]
+        chunk_counts: dict[str, int] = {}
+        if ids:
+            agg = await db.execute(
+                select(PaperChunk.arxiv_id, func.count())
+                .where(PaperChunk.arxiv_id.in_(ids))
+                .group_by(PaperChunk.arxiv_id)
+            )
+            chunk_counts = {row[0]: int(row[1]) for row in agg}
+
+    return {
+        "total": int(total),
+        "limit": limit,
+        "offset": offset,
+        "items": [
+            {
+                "arxiv_id": p.arxiv_id,
+                "title": p.title,
+                "published": p.published.isoformat() if p.published else None,
+                "primary_category": p.primary_category,
+                "categories": p.categories or [],
+                "venue": p.venue,
+                # 分档只作为独立字段返回，不进 F4 的九列口径（见 venue_tier 的注释）。
+                "venue_tier": lookup_tier(p.venue or "") if p.venue else None,
+                "cited_by_count": p.cited_by_count,
+                # 被引数必须带截至日期，否则读者会把它当成实时值比较。
+                "cited_at": p.cited_at.isoformat() if p.cited_at else None,
+                "has_code": p.has_code,
+                "chunk_count": chunk_counts.get(p.arxiv_id, 0),
+            }
+            for p in papers
+        ],
+    }
 
 
 # --------------------------------------------------------------------------- F13 单篇深挖

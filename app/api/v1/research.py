@@ -46,7 +46,7 @@ import structlog
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 
 from app.agents.graph import open_graph, thread_config
 from app.analysis.timeline import build_timeline
@@ -387,6 +387,76 @@ async def research_resume(run_id: str, body: ResumeRequest | None = None) -> Str
 
 
 # --------------------------------------------------------------------------- 查询
+# --------------------------------------------------------------------------- 运行列表
+# ⚠️ 必须声明在 `/{run_id}` **之前**：FastAPI 按声明顺序匹配，
+# 空路径本身不冲突，但这条一旦挪到后面，读起来就会让人以为它被动态路由吃掉了。
+@router.get("", summary="最近的运行列表")
+async def list_runs(limit: int = 20, offset: int = 0, status: str | None = None) -> dict:
+    """前端靠这条决定"报告页/会话页该展示哪一次运行"。
+
+    没有它的话 `run_id` 只能靠用户从日志里抄 —— 那等于把 F5/F8/F9 全部锁死。
+    顺带把每次运行的引用数与支撑率一起给出，列表页才能一眼挑出"哪次跑得值"。
+    """
+    limit = max(1, min(limit, 100))
+    offset = max(0, offset)
+
+    async with session_scope() as db:
+        cond = [ResearchRun.status == status] if status else []
+
+        total = (
+            await db.execute(select(func.count()).select_from(ResearchRun).where(*cond))
+        ).scalar_one()
+
+        rows = (
+            (
+                await db.execute(
+                    select(ResearchRun)
+                    .where(*cond)
+                    .order_by(ResearchRun.started_at.desc())
+                    .limit(limit)
+                    .offset(offset)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        # 一次分组查询拿全部引用的统计，避免 N 个 run 打 N 次库。
+        run_ids = [r.id for r in rows]
+        stats: dict[str, tuple[int, int]] = {}
+        if run_ids:
+            agg = await db.execute(
+                select(
+                    Citation.run_id,
+                    func.count().label("total"),
+                    func.coalesce(func.sum(case((Citation.verified.is_(True), 1), else_=0)), 0).label("ok"),
+                )
+                .where(Citation.run_id.in_(run_ids))
+                .group_by(Citation.run_id)
+            )
+            stats = {row[0]: (int(row[1]), int(row[2])) for row in agg}
+
+    items = []
+    for r in rows:
+        total_c, ok_c = stats.get(r.id, (0, 0))
+        items.append(
+            {
+                "run_id": r.id,
+                "session_id": r.session_id,
+                "question": r.question,
+                "status": r.status,
+                "started_at": r.started_at.isoformat() if r.started_at else None,
+                "ended_at": r.ended_at.isoformat() if r.ended_at else None,
+                "citation_count": total_c,
+                # 支撑率：分母是**已校验**的引用数。`verified` 可为 NULL（还没校验），
+                # 把 NULL 算进分母会让"刚跑完还没校验"和"校验后一半没支撑"看起来一样。
+                "verified_rate": (round(ok_c / total_c, 4) if total_c else None),
+            }
+        )
+
+    return {"total": int(total), "limit": limit, "offset": offset, "items": items}
+
+
 @router.get("/{run_id}", summary="查询运行状态与最终报告")
 async def get_run(run_id: str) -> dict:
     """状态取自 checkpointer（它是 state 的权威来源），元信息取自数据库。

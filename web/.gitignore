@@ -1,0 +1,13 @@
+node_modules
+dist
+dist-ssr
+*.local
+
+# 个人本地配置，永远不进仓库
+.env
+.env.local
+.env.*.local
+
+.vite
+.DS_Store
+*.log

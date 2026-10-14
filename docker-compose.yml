@@ -5,9 +5,11 @@
 #   cp .env.example .env          # 按需修改；不建 .env 也能起（默认走 mock 可跑通）
 #   docker compose up --build
 # 访问：
+#   React 控制台 http://localhost:8000/     ← api 镜像内置 web/dist，同源单端口（首选入口）
 #   API 文档  http://localhost:8000/docs
 #   健康检查  http://localhost:8000/healthz
-#   Streamlit http://localhost:8501
+#   Streamlit 旧面板不再默认启动（见 ui 服务的 profiles 说明），调试入口：
+#   docker compose --profile legacy-ui up
 # =============================================================================
 services:
   api:
@@ -61,7 +63,14 @@ services:
     stop_grace_period: 30s                   # 让进行中的研究有机会落 checkpoint
     restart: unless-stopped
 
+  # 旧 Streamlit 面板 —— 调试/对照入口，不是产品界面。
+  # 处置决定：保留服务定义但挂到 legacy-ui profile 下，默认 `docker compose up` 不再启动它。
+  # 理由：React 控制台已覆盖 F1~F19 且由 api:8000 同源提供，默认再起一个 8501 旧面板
+  #       只会让人误以为那是产品入口（就是本次要修的文档/交付物错位）；
+  #       但直接删掉 ui/ 服务会砍掉排查后端问题时好用的原始入口，所以降级为可选。
+  # 默认 up 的人不会"看不到界面"：浏览器打开 http://localhost:8000 即是 React 控制台。
   ui:
+    profiles: ["legacy-ui"]
     build:
       context: .
       dockerfile: Dockerfile.ui

@@ -212,7 +212,7 @@ async def test_venue_tier_is_a_static_route_not_swallowed_by_paper_id(client):
 async def test_terms_annotate_and_lookup(client):
     resp = await client.get("/api/v1/terms", params={"text": "用 RAG 配合 cross-encoder reranking，指标看 nDCG"})
     assert resp.status_code == 200
-    terms = {t["term"] for t in resp.json()["terms"]}
+    terms = {t["term"] for t in resp.json()["matches"]}
     assert {"RAG", "cross-encoder", "reranking", "nDCG"} <= terms
 
     hit = (await client.get("/api/v1/terms/LoRA")).json()
@@ -221,6 +221,25 @@ async def test_terms_annotate_and_lookup(client):
     miss = (await client.get("/api/v1/terms/ totally-made-up-term")).json()
     # 未命中是 200 + known=false，不是 404：这是有效查询结果，不是请求出错
     assert miss["known"] is False and miss["explanation"] is None
+
+
+async def test_terms_annotate_post_matches_get(client):
+    """★ 前端 `terms.mark()` 走的是 POST（整篇报告正文放不进 query）。
+
+    这条锁住两件事：方法存在（曾经只有 GET，前端每次调用都 405，而它的 .catch 会把
+    术语静默清空 —— 界面看起来正常，功能其实没跑），以及两条路返回同一个键名 `matches`。
+    """
+    text = "用 RAG 配合 cross-encoder reranking，指标看 nDCG"
+    post = await client.post("/api/v1/terms", json={"text": text})
+    assert post.status_code == 200
+    assert post.json() == (await client.get("/api/v1/terms", params={"text": text})).json()
+
+
+async def test_terms_annotate_post_rejects_blank_and_oversized(client):
+    assert (await client.post("/api/v1/terms", json={"text": "   "})).status_code == 422
+    assert (await client.post("/api/v1/terms", json={"text": "x" * 20001})).status_code == 422
+    # 多传字段直接拒（extra=forbid），免得调用方以为传了个没用的参数而生效
+    assert (await client.post("/api/v1/terms", json={"text": "RAG", "top_k": 3})).status_code == 422
 
 
 async def test_terms_unknown_batch(client):

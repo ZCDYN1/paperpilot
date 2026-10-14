@@ -25,6 +25,14 @@ README 承诺的是"tenacity 重试 / 超时 / 熔断"一条完整链路，而�
 顺序由 `app/core/resilience.resilient()` 保证：重试在最内、超时在中间、熔断在最外
 （一次调用只记一次失败，详见该模块 docstring 与 `tests/test_resilience.py` 的顺序用例）。
 
+## ★ 流式入口为什么只有 `text_invoke` 一个（而不是每个节点都能流）
+SSE 的 `token` 事件（架构 §8「LLM 输出增量，前端打字机」）要求**真实生成过程中产生的增量**，
+而增量只有 `llm.astream` 给得出来。但它不能变成"人人可用的第二调用入口"：
+plan / read / verify / compare 走的是 `with_structured_output`，增量是 JSON 碎片，
+吐给用户只会看到 `{"rows": [{"claim` 这种半截语法 —— 那些节点**没有**合法的 token 流可言。
+所以这里只给自由文本那条路开流式口子，且当前唯一的使用者是 `write` 节点
+（综述正文是这篇产品唯一"值得逐字看"的产出物）。
+
 ## 三条"不许把链路堵死"的护栏
 1. `RESILIENCE_ENABLED=false` 时 `guarded()` 直接透传 —— 保护逻辑自己出问题时一条环境变量就能退场；
 2. mock provider 永不失败 → 断路器永远停在 closed，离线链路行为与接线前完全一致
@@ -37,8 +45,10 @@ README 承诺的是"tenacity 重试 / 超时 / 熔断"一条完整链路，而�
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from typing import Any
 
+import structlog
 from langchain_core.messages import AIMessage, BaseMessage
 from pydantic import BaseModel
 
@@ -47,6 +57,8 @@ from app.core.resilience import BREAKER_LLM, CircuitOpenError, guarded
 from app.observability.events import emit_out_of_band
 from app.observability.resilience_events import RESILIENCE_NODE, sse_observer
 
+logger = structlog.get_logger(__name__)
+
 # 引用校验时用的空白归一化：PDF/HTML 抽取出来的文本里有大量换行与多余空格，
 # 直接做子串匹配会因为"少一个空格"而误判为不通过 —— 那会把好引用错杀。
 _WS_RE = re.compile(r"\s+")
@@ -54,6 +66,11 @@ _WS_RE = re.compile(r"\s+")
 # 熔断打开时上报给前端的错误码：与 API 层的异常→错误码映射同一口径，
 # 前端按 code 分支（`llm_circuit_open` 可提示"稍后重试"，`internal_error` 只报错）。
 CIRCUIT_OPEN_CODE = "llm_circuit_open"
+
+# 流式生成中途失败、且**已经往用户面前吐过字**时用的错误码（`TokenSink.abort`）。
+# 不复用 `llm_circuit_open`：那条链路最后成功了，要说的不是"下游挂了"，
+# 而是"刚才那段流作废了" —— 前端只有按 code 分支才能把两者区分开。
+STREAM_ABORT_CODE = "token_stream_aborted"
 
 
 def normalize_text(text: str) -> str:
@@ -111,12 +128,47 @@ async def _structured_call(
     return parsed, usage_of(raw)
 
 
-async def _text_call(messages: list[BaseMessage], temperature: float | None) -> tuple[str, dict[str, int]]:
-    """**裸**的自由文本调用。"""
-    message: AIMessage = await get_llm(temperature).ainvoke(messages)
-    content = message.content
-    text = content if isinstance(content, str) else str(content)
-    return text, usage_of(message)
+async def _text_call(
+    messages: list[BaseMessage],
+    temperature: float | None,
+    on_delta: Callable[[str], None] | None = None,
+    on_abort: Callable[[BaseException], None] | None = None,
+) -> tuple[str, dict[str, int]]:
+    """**裸**的自由文本调用；给了 `on_delta` 就走真流式（逐增量回调）。
+
+    两条路径的**返回值口径完全一致**（`(全文, usage)`），所以调用方不需要区分：
+    流式只是顺带把增量送出去，不改变返回形状、也不改变失败语义 —— 异常照原样往上抛，
+    外层的重试 / 超时 / 熔断继续生效（`guarded` 包的正是这个函数本身）。
+
+    `on_abort` 只在"**已经吐过增量、这次尝试却又失败**"时调用：这是流式与重试唯一
+    真正打架的地方（重试会从头重新生成一遍），处置口径见 `TokenSink` 的 docstring。
+    超时是 `asyncio.wait_for` 取消这次调用，异常同样在这个函数里被感知到。
+    """
+    if on_delta is None:
+        message: AIMessage = await get_llm(temperature).ainvoke(messages)
+        content = message.content
+        text = content if isinstance(content, str) else str(content)
+        return text, usage_of(message)
+
+    parts: list[str] = []
+    streamed_chars = 0
+    merged: Any = None
+    try:
+        async for chunk in get_llm(temperature).astream(messages):
+            # 用 `+` 归并而不是自己拼字符串：langchain-core 的 chunk 相加会把
+            # `usage_metadata` / `response_metadata` 一起并进来，usage 才是拿得到的前提。
+            merged = chunk if merged is None else merged + chunk
+            delta = chunk_text(chunk)
+            if not delta:
+                continue
+            parts.append(delta)
+            streamed_chars += len(delta)
+            on_delta(delta)
+    except BaseException as exc:  # noqa: BLE001 - 原样上抛，只在"已经吐过字"时补一次作废通知
+        if streamed_chars and on_abort is not None:
+            on_abort(exc)
+        raise
+    return "".join(parts) or chunk_text(merged), usage_of(merged)
 
 
 def _on_circuit_open(breaker_name: str, exc: CircuitOpenError) -> None:
@@ -162,19 +214,156 @@ async def text_invoke(
     messages: list[BaseMessage],
     *,
     temperature: float | None = None,
+    on_delta: Callable[[str], None] | None = None,
+    on_abort: Callable[[BaseException], None] | None = None,
 ) -> tuple[str, dict[str, int]]:
-    """调 LLM 并返回 `(文本, token 用量)`，保护口径与 `structured_invoke` 一致。"""
+    """调 LLM 并返回 `(文本, token 用量)`，保护口径与 `structured_invoke` 一致。
+
+    传 `on_delta` 时走**真流式**（底层 `llm.astream`，每来一个增量回调一次），
+    返回值与不传时逐字同口径。要清楚它换来的是什么、代价是什么：
+
+    - 换到的：`token` 事件带的是**生成过程中真实产生的文本片段**，不是事后切片假流；
+    - 代价：**重试会从头重新生成**。第一次尝试已经吐过字又失败时，
+      同一段内容会第二次进入用户的预览（`token` 契约只有 `delta` 拼接语义，
+      没有"重置"字段，也不该为了它再改一轮前端）。
+      所以这里的原则是"**只让没失败过的那次尝试往外吐字**"：
+      作废由 `on_abort` 明确告知前端，之后的尝试不再流（正文仍完整返回，
+      最终报告的正确性由 `final_report` 事件兜住）。实现见 `TokenSink`。
+    """
     try:
         return await guarded(
             _text_call,
             messages,
             temperature,
+            on_delta,
+            on_abort,
             breaker_name=BREAKER_LLM,
             observer=sse_observer,
         )
     except CircuitOpenError as exc:
         _on_circuit_open(BREAKER_LLM, exc)
         raise
+
+
+# ---------------------------------------------------------------------------
+# 真流式的落地：把节点内部的生成增量送上 SSE 流
+# ---------------------------------------------------------------------------
+def chunk_text(chunk: Any) -> str:
+    """从一次（可能是流式）返回里取出**文本增量**。
+
+    三种形态都要照顾到：纯 `str`、内容块列表（`[{"type": "text", ...}]`，
+    langchain-core 1.x 的标准表示）、以及非消息对象。`.text` 属性已经把前两种归一好了，
+    拿不到时才退回 `content` —— 顺序很关键，直接用 `str(content)` 会把
+    `[{'type': 'text', 'text': '你好'}]` 这种 Python 字面量吐给用户。
+    """
+    if chunk is None:
+        return ""
+    text = getattr(chunk, "text", None)
+    if isinstance(text, str):
+        return text
+    content = getattr(chunk, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(block.get("text", ""))
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    return "" if content is None else str(content)
+
+
+class TokenSink:
+    """把一次 LLM 生成的**真实增量**送进当前这条 SSE 流。
+
+    ## 为什么走 LangGraph 的 `custom` 通道，而不是现成的 `emit_out_of_band`
+    侧信道队列是 `stream()` **每收到一个 chunk 之后**才 drain 一次的，
+    而 `stream_mode="updates"` 只有等整个节点跑完才给 chunk ——
+    于是 write 期间攒下的 token 会全部憋到生成结束才一次性落地，
+    用户看到的是"卡半分钟然后整篇出现"，等于没流式。
+    `custom` 通道（`get_stream_writer()`）是 LangGraph 专为"节点内部往上冒增量"留的口子，
+    **写入即到达**；`app/observability/events.py` 的 `stream()` 负责把 payload 翻成 SSE 帧，
+    所以协议仍然只在 events.py 一处（节点侧照旧只写 `{"type": ..., **data}` 裸 dict）。
+
+    ## ★ 与"失败重试"的冲突怎么解（这个类一半的存在理由）
+    `guarded()` 的重试包在整个生成外面，一次尝试失败会**从头重新生成**。
+    若第一次已经吐了 N 字、第二次再吐一遍，前端 `streamed += delta` 拼出来的就是重复内容
+    —— 而它没有任何"清空预览"的入口。取舍如下（宁少流、不重流）：
+    1. 没吐过字的失败尝试**不作废**，下一次尝试继续正常流（最常见的失败发生在这之前）；
+    2. 已经吐过字又失败 → 补发一条 `error`（`code=token_stream_aborted`,
+       `recoverable=True`）明确告知"已流出的内容作废，请以最终报告为准"，
+       并把这条 sink **关闭**：后续尝试不再往外吐字；
+    3. 重试语义**完全不动** —— 该重试还重试、该超时还超时、该熔断还熔断，
+       变的只是"要不要把这段进程实时演给用户看"。
+    """
+
+    def __init__(self, node: str, writer: Callable[[Any], Any] | None = None) -> None:
+        self.node = node
+        self._writer = writer
+        self.chunks_sent = 0
+        self.chars_sent = 0
+        self.closed = False
+
+    @property
+    def streaming(self) -> bool:
+        """现在还能不能往外吐字（没有通道、或已经作废 → 都不能）。"""
+        return self._writer is not None and not self.closed
+
+    def feed(self, delta: str) -> None:
+        """送出一个真实增量。作废之后静默吞掉（这就是"不重流"的执行点）。"""
+        if not self.streaming or not delta:
+            return
+        self._push(node_event("token", node=self.node, delta=delta))
+        self.chunks_sent += 1
+        self.chars_sent += len(delta)
+
+    def abort(self, exc: BaseException) -> None:
+        """本次尝试已吐过字却又失败（马上要被重试从头再生）→ 声明作废并关流。
+
+        一个字都没吐过时**不作废也不关流**：没有内容需要丢弃，
+        而"让下一次尝试继续流"是这次运行能保住打字机效果的唯一机会。
+        """
+        if self._writer is None or self.closed or not self.chunks_sent:
+            return
+        self.closed = True
+        self._push(
+            node_event(
+                "error",
+                node=self.node,
+                code=STREAM_ABORT_CODE,
+                message=(
+                    f"生成中断，正在重试：已流出的 {self.chars_sent} 字作废，"
+                    f"最终内容以报告为准（{str(exc)[:160]}）"
+                ),
+                recoverable=True,
+            )
+        )
+
+    def _push(self, event: dict[str, Any]) -> None:
+        if self._writer is None:
+            return
+        try:
+            self._writer(event)
+        except Exception as exc:  # noqa: BLE001 - 事件发不出去绝不能毁掉一次生成
+            logger.debug("sse.token_push_failed", node=self.node, error=str(exc)[:120])
+
+
+def make_token_sink(node: str) -> TokenSink:
+    """取"当前这次图执行"的 custom 流通道并包成 `TokenSink`。
+
+    拿不到通道时（单测直接调节点函数、脚本跑 `ainvoke`、图没开 custom 流）
+    返回的 sink 全程静默 no-op —— 与 `emit_out_of_band` "不在流里就只打日志"
+    同一个降级口径：**发不出事件绝不许让节点失败**。
+    """
+    try:
+        # 延迟 import：只有流式入口需要图运行时，core/observability 层都不该依赖它。
+        from langgraph.config import get_stream_writer
+
+        writer: Callable[[Any], Any] | None = get_stream_writer()
+    except Exception as exc:  # noqa: BLE001 - 不在图运行上下文里（含 RuntimeError: 无 RunnableConfig）
+        logger.debug("sse.no_stream_writer", node=node, error=str(exc)[:120])
+        writer = None
+    return TokenSink(node, writer)
 
 
 # ---------------------------------------------------------------------------
@@ -252,8 +441,12 @@ def chunk_index(retrieved: list[dict[str, Any]]) -> dict[tuple[str, int], dict[s
 
 __all__ = [
     "CIRCUIT_OPEN_CODE",
+    "STREAM_ABORT_CODE",
+    "TokenSink",
     "chunk_index",
+    "chunk_text",
     "dedup_papers",
+    "make_token_sink",
     "merge_usage",
     "node_event",
     "normalize_text",
