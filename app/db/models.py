@@ -1,6 +1,13 @@
-"""ORM 模型：13 张表。
+"""ORM 模型：15 张表。
 
 几个刻意的设计：
+
+⚠️ **改这张文件前先读：只允许新建表，不允许给已有表加列/改列。**
+   SQLite 下 `Base.metadata.create_all` 只补建**缺失的表**，不会 ALTER 已存在的表 ——
+   所以给老表加一列的后果是：新 clone 的库正常，任何已有 `data/sqlite/paperpilot.db`
+   的机器上那一列永远不存在，而 ORM 读它时才炸。本项目已经真实踩过一次
+   （`comparison_rows` 表建得比代码晚，老库里没有它，`finalize` 的落库整段被
+   `try/except` 吞掉，表现成"对比表静默消失"）。要加字段就**新建一张附表**。
 
 - **`citations` 单独建表**：让「引用可溯源」变成*可查询、可校验的事实*，
   而不只是 prompt 里的一句约束。Verifier 的校验结果直接写回 `verified` 字段，
@@ -339,6 +346,71 @@ class EvalSample(Base):
     eval_run: Mapped[EvalRun] = relationship(back_populates="samples")
 
 
+# =============================================================================
+# 引用关系与被引趋势（产品定义 F16 / F19）
+# =============================================================================
+class CitationEdge(Base):
+    """「谁引用了谁」的一条边。**只存证据，不存推断。**
+
+    来源（`source`）目前只有一种真实可用的：OpenAlex work 的 `referenced_works`
+    列表（论文自己参考文献的机器可读版）。⚠️ 刻意**不允许**用"年份先后 + 主题相似"
+    造边 —— F12 的"谁补了谁的坑"一旦建立在推断上，就重新踩回产品定义 §7
+    承诺不做的事：把没有依据的叙事写成看起来通顺的结论。
+    库里查不到的被引方也存（`in_corpus=False`），它至少说明"这篇引了谁"；
+    但画图和推演进关系时前端必须区分：非库内节点没有正文证据可点。
+    """
+
+    __tablename__ = "citation_edges"
+    __table_args__ = (
+        # 同一对论文从同一来源重复抓取是常态（每次 enrich 都会再拿到一遍），
+        # 靠唯一约束做幂等，而不是靠"先查再插"（并发下会双插）。
+        UniqueConstraint(
+            "citing_arxiv_id", "cited_arxiv_id", "source", name="uq_citation_edge"
+        ),
+        Index("ix_citation_edges_cited", "cited_arxiv_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    citing_arxiv_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    cited_arxiv_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    source: Mapped[str] = mapped_column(String(32), default="openalex", nullable=False)
+    # 两端的 OpenAlex id：OpenAlex 的记录会被合并/重定向，只留 arXiv id 就没法复查
+    citing_openalex_id: Mapped[str | None] = mapped_column(String(32))
+    cited_openalex_id: Mapped[str | None] = mapped_column(String(32))
+    in_corpus: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class CitationSnapshot(Base):
+    """某篇论文在**某一天**的被引数。F19「被引趋势」的唯一诚实来源。
+
+    为什么单独建表而不是给 `papers` 加列：一列只能存最新值，历史就没了；
+    而"趋势"的定义本身就是多个采样点。`papers.cited_at` 已经存了最近一次的日期，
+    这张表补的是它之前的整条序列。
+    ⚠️ 只有 1 个采样点时**不许**报趋势（代码里判的就是 `len(points) >= 2`），
+    报出来只会是一个被随机波动带偏的斜率。
+    """
+
+    __tablename__ = "citation_snapshots"
+    __table_args__ = (
+        # 一天一条：同一天重复抓只保留最新的那次数字
+        UniqueConstraint("arxiv_id", "taken_on", name="uq_citation_snapshot"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    arxiv_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    cited_by_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    taken_on: Mapped[date] = mapped_column(Date, index=True, nullable=False)
+    source: Mapped[str] = mapped_column(String(32), default="openalex", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 __all__ = [
     "Paper",
     "PaperChunk",
@@ -348,6 +420,8 @@ __all__ = [
     "Message",
     "LongTermMemory",
     "Citation",
+    "CitationEdge",
+    "CitationSnapshot",
     "ToolCallLog",
     "TokenUsage",
     "EvalRun",

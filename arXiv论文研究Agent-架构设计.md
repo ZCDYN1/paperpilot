@@ -544,7 +544,7 @@ RRF 只用**排名**：`Σ 1/(k + rank)`，量纲问题被彻底绕过，且对�
 
 ---
 
-## 6. 数据模型（SQLAlchemy 2.0，12 张表）
+## 6. 数据模型（SQLAlchemy 2.0，15 张表）
 
 | 表 | 关键字段 | 用途 |
 |---|---|---|
@@ -555,7 +555,10 @@ RRF 只用**排名**：`Σ 1/(k + rank)`，量纲问题被彻底绕过，且对�
 | `research_runs` | id(PK), session_id(FK), thread_id, question, status, langgraph_state(JSON), started_at, ended_at | 关联 LangGraph run |
 | `messages` | id(PK), session_id(FK), role, content, node_name, created_at | 短期记忆 |
 | `long_term_memories` | id(PK), session_id, memory_type, content, embedding(BLOB), importance, last_used_at | 向量长期记忆 |
-| `citations` | id(PK), run_id(FK), claim, chunk_id(FK), quote, verified(BOOL) | 引用证据链（可溯源的核心） |
+| `citations` | id(PK), run_id(FK), claim, chunk_id(FK), quote, locator, source, verified(BOOL), note, resolution_how, verify_reanchored | 引用证据链（可溯源的核心） |
+| `comparison_rows` | id(PK), run_id(FK), row_index, arxiv_id, method_name, core_idea, datasets, improvement, cost, limitation, code_url, venue, cited_by_count, cited_at | 结构化对比表（F4 的"字段完整率"数据源；每行一篇、与对外 9 列一一对应） |
+| `citation_edges` | id(PK), citing_arxiv_id, cited_arxiv_id, source, citing/cited_openalex_id, in_corpus，唯一约束(引用方, 被引方, source) | 引用关系（F16）。**只存 OpenAlex `referenced_works` 这一种证据**，禁止用年份/主题推断造边 |
+| `citation_snapshots` | id(PK), arxiv_id, cited_by_count, taken_on，唯一约束(arxiv_id, taken_on) | 被引数的时间序列（F19 趋势的唯一诚实来源；`papers.cited_by_count` 只存最新值，历史在这张表里） |
 | `tool_call_logs` | id(PK), run_id, node_name, tool_name, args(JSON), status, duration_ms, error | 工具调用审计 |
 | `token_usage` | id(PK), run_id, node_name, model, prompt_tokens, completion_tokens, cost_estimate | Token 统计 |
 | `eval_runs` | id(PK), name, dataset, config(JSON), metrics(JSON), created_at | 评测记录 |
@@ -563,6 +566,12 @@ RRF 只用**排名**：`Σ 1/(k + rank)`，量纲问题被彻底绕过，且对�
 
 > `citations` 单独建表的目的：让"引用可溯源"变成**可查询、可校验的事实**，
 > 而不只是 prompt 里的一句约束。Verifier 节点的校验结果直接写回这张表的 `verified` 字段。
+
+> ⚠️ **改表的一条硬规矩：只允许新建表，不允许给已有表加列。**
+> SQLite 下 `Base.metadata.create_all` 只补建缺失的表，**不会 ALTER 已存在的表** ——
+> 给老表加一列的后果是"新 clone 的库正常、任何已有 `data/sqlite/*.db` 的机器上那一列永远不存在"，
+> 而且往往被 `try/except` 吞掉，表现成某个功能静默消失（本项目真实踩过 `comparison_rows` 这一例）。
+> 需要新字段就**新建一张附表**，`citation_snapshots` 就是这么来的。
 
 ---
 
@@ -575,6 +584,20 @@ RRF 只用**排名**：`Σ 1/(k + rank)`，量纲问题被彻底绕过，且对�
 | GET | `/api/v1/research/{run_id}` | 查询 run 状态与最终报告 | ✅ |
 | GET | `/api/v1/research/{run_id}/citations` | 拿引用证据链（前端画溯源卡片） | ✅ |
 | GET | `/api/v1/research/{run_id}/export.md` | 导出 Markdown 报告（F8，含对比表与参考文献） | ✅ |
+| GET | `/api/v1/research/{run_id}/related-work.md` | 「相关工作」章节草稿，按方法分组（F18） | ✅ |
+| GET | `/api/v1/research/{run_id}/timeline` | 方法演进时间线（F12；无引用边时 `addresses_gap` 恒空） | ✅ |
+| POST | `/api/v1/research/{run_id}/followup` | 基于本次已校验证据追问，**不重新检索**（F9） | ✅ |
+| GET | `/api/v1/papers/{arxiv_id}` | 单篇详情：元数据 + 章节级 chunk + 历史引用（F13） | ✅ |
+| POST | `/api/v1/papers/{arxiv_id}/ask` | 只在该篇内容上问答（F13） | ✅ |
+| POST | `/api/v1/papers/upload` | 上传 PDF / TXT / MD 入库（F15；PDF 解析器是可选 extra） | ✅ |
+| POST | `/api/v1/papers/references/build` | 抓 OpenAlex `referenced_works` 落引用边（F16） | ✅ |
+| GET | `/api/v1/papers/references/graph` | 一层引用关系图（F16） | ✅ |
+| POST | `/api/v1/papers/citations/snapshot` | 记录当天被引数（F19 趋势的数据源） | ✅ |
+| GET | `/api/v1/papers/{arxiv_id}/citation-trend` | 被引趋势（F19；采样点 < 2 不给结论） | ✅ |
+| GET | `/api/v1/papers/venue-tier` | 会议/期刊分档（F19，独立字段、不进 9 列对比表） | ✅ |
+| GET | `/api/v1/terms` | 标注一段文本里出现的术语及位置（F11） | ✅ |
+| GET | `/api/v1/terms/{term}` | 查单个术语；未命中是 `200 + known=false`，不是 404（F11） | ✅ |
+| POST | `/api/v1/terms/unknown` | 批量问"哪些术语词表里没有"（F11） | ✅ |
 | GET | `/healthz` | 健康检查（含 FAISS 索引是否加载、模型是否就绪） | ✅ |
 | GET | `/resilience` | 熔断器实时状态（运维排查用） | ✅ |
 | POST | `/api/v1/papers/ingest` | 按 arxiv_id / 关键词批量入库建索引 | ⏳ 待实现（现在由 `ensure_corpus` 节点与 `scripts/build_index.py` 承担） |
@@ -584,6 +607,12 @@ RRF 只用**排名**：`Σ 1/(k + rank)`，量纲问题被彻底绕过，且对�
 
 > 「实现状态」这一列是刻意加的：上面这张表最初是**设计目标**，不是清单快照。
 > 一张看起来都像已实现的表会让人照着写前端，然后在 404 上花掉半天。
+
+> ⚠️ 路由**声明顺序**在 `/api/v1/papers` 这一组里是契约的一部分：
+> 静态段（`/papers/venue-tier`、`/papers/upload`、`/papers/references/…`）必须声明在
+> `/papers/{arxiv_id}` 之前。FastAPI 按声明顺序匹配，顺序错了不报错，
+> 只会得到"这篇论文不存在"的 404 —— 排查方向会被带到数据库上。
+> 哨兵测试：`tests/test_api_corpus_routes.py::test_venue_tier_is_a_static_route_not_swallowed_by_paper_id`。
 
 ### SSE 实现要点
 

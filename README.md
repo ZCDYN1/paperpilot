@@ -24,7 +24,12 @@
   —— 标记而不剔除等于把编造的引用换个位置放，本产品的承诺是"剔除 + 承认"
 - **实时过程可见**：SSE 流式推送节点 / 工具调用 / 召回片段，等待期间不是黑盒
 - **一键导出**：`GET /api/v1/research/{run_id}/export.md` 在服务端渲染完整报告
-  （对比表 + 正文 + 带章节定位的参考文献 + 薄弱结论 + 成本耗时 + 免责声明），下载即是用 markdown 写好的材料
+  （对比表 + 正文 + 带章节定位的参考文献 + 薄弱结论 + 成本耗时 + 免责声明），下载即是用 markdown 写好的材料；
+  另有 `related-work.md` 输出按方法分组的「相关工作」章节草稿
+- **单篇深挖与自有文献**：`/papers/{id}/ask` 只在某一篇的内容上作答，取不到支撑就明说；
+  `POST /papers/upload` 能把自己的 PDF / TXT / MD 切块入库，之后同样可被检索与溯源
+- **引用关系与被引趋势**：从 OpenAlex 的 `referenced_works` 落引用边（谁引用了谁），
+  被引数按天存快照、够两个点才谈趋势
 - **状态可续跑**：LangGraph SqliteSaver 持久化，中断后可恢复，不重复烧 token
 - **长期记忆**：记住关注方向 / 已读论文 / 输出偏好，**跨会话生效**。已读过的论文在下次研究时
   让出精读候选位（检索候选一篇不删，未读不足时按重排序补位），对应产品定义 F10「下次不重复推荐」
@@ -152,6 +157,19 @@ Streamlit 面板只是其中一种客户端，下面这些是对外契约（`htt
 | GET | `/api/v1/research/{run_id}` | run 状态、报告正文、对比表、引用、token 用量 |
 | GET | `/api/v1/research/{run_id}/citations` | 引用证据链（含章节定位与证据强度） |
 | GET | `/api/v1/research/{run_id}/export.md` | 导出 Markdown 报告（F8） |
+| GET | `/api/v1/research/{run_id}/related-work.md` | 导出「相关工作」章节草稿，按方法分组（F18） |
+| GET | `/api/v1/research/{run_id}/timeline` | 方法演进时间线（F12；没建引用边时 `addresses_gap` 恒为空） |
+| POST | `/api/v1/research/{run_id}/followup` | **基于这次研究已读且已校验的证据**追问，不重新检索（F9） |
+| GET | `/api/v1/papers/{arxiv_id}` | 单篇详情：元数据 + 章节级 chunk + 该篇历史引用（F13） |
+| POST | `/api/v1/papers/{arxiv_id}/ask` | 只在这一篇的内容上问答，取不到支撑就明说（F13） |
+| POST | `/api/v1/papers/upload` | 上传自己的 PDF / TXT / MD 入库（F15；PDF 需 `pip install -e ".[pdf]"`） |
+| POST | `/api/v1/papers/references/build` | 抓 OpenAlex 的 `referenced_works` 落引用边（F16） |
+| GET | `/api/v1/papers/references/graph?ids=a,b` | 取一层引用关系图（F16） |
+| POST | `/api/v1/papers/citations/snapshot` | 记录今天的被引数（F19 趋势的数据源，需定期调用） |
+| GET | `/api/v1/papers/{arxiv_id}/citation-trend` | 被引趋势；采样点 < 2 时 `verdict=insufficient_data`（F19） |
+| GET | `/api/v1/papers/venue-tier?venue=ACL 2024` | 会议/期刊分档，独立字段、不进 9 列对比表（F19） |
+| GET | `/api/v1/terms?text=…` | 标出文本里的术语及位置（F11） |
+| GET | `/api/v1/terms/{term}` | 查单个术语；未命中是 `200 + known=false`，不是 404（F11） |
 | GET | `/healthz` | 健康检查 + 索引状态（`index.compatible` 会告诉你换模型后该重建） |
 | GET | `/resilience` | 熔断器实时状态 |
 
@@ -398,8 +416,10 @@ python -c "import sqlite3;print(sqlite3.connect('data/sqlite/paperpilot.db').exe
 不传则 `session_id = run_id`，一次提问即一个全新会话（老行为不变）。
 注意两条边界：① `thread_id` **永远是 run 级**，会话靠 `session_id` 串多个 run，
 共用 checkpoint thread 会让新提问接着上一轮已跑完的 state 走（不报错，只是被污染）；
-② 追问仍然会走完整的 `ensure_corpus → retrieve` 链路，**不会**复用上一轮已检索到的内容 ——
-"基于已读论文继续问、不重新检索"目前是待实现项，不是现状。
+② F9 有**两条不同的路径**，成本完全不同：`POST /research/stream` 带 `session_id` 走完整链路
+（拆解时能看到本会话此前的问答，指代能被补全，但仍会重新检索）；
+`POST /research/{run_id}/followup` 才是"不重新检索"那条 —— 它只在上一轮**已校验通过**的引用上作答，
+一次 LLM 调用，不碰索引也不联网，复用不了时如实返回 `status="no_evidence"` 而不是偷偷退化成全量研究。
 长期记忆则是另一套口径：它属于用户、跨会话生效，读取与淘汰都不按会话过滤。
 ⚠️ 若将来接多用户或部署成公共服务，这里**必须**换成显式的 user id，否则记忆会跨用户串。
 
@@ -415,16 +435,23 @@ python -c "import sqlite3;print(sqlite3.connect('data/sqlite/paperpilot.db').exe
 在长期记忆变成跨会话生效之后，这种污染会让排除机制逐步失效且不报错。
 
 **7. 功能覆盖到哪一步**
-P0（F1 拆解可编辑 / F2 三类过滤 / F3 混合检索+重排 / F4 对比表 / F5 引用溯源 /
-F6 引用校验并剔除无支撑论断 / F7 SSE 过程可见 / F8 导出 Markdown）后端全部可用，
-`tests/test_api_feature_switches.py` 有一条从 HTTP 打到节点的真实链路冒烟。
-P1 里已做 F9（见上一节边界）、F10、F14（`arxiv_ids` 定向对比）、F17（`language` 中英切换）。
-**未做**：F11 术语悬停解释、F12 方法演进时间线、F13 单篇深挖模式，
-以及 P2 的 F15 上传自有 PDF（与本文 §7「不解析 PDF」的边界冲突，需要先重新讨论边界）、
-F16 引用关系图（要新增引用边表 + OpenAlex references）、F18 相关工作章节草稿、
-F19 会议/期刊分级与被引趋势（现在只有 `venue` 正则与单次被引数）。
-另外这些对外接口目前只有脚本入口、没有 HTTP 路由：`/api/v1/papers`、`/api/v1/papers/ingest`、
-`/api/v1/eval/run`、`/api/v1/metrics/tokens`。
+产品定义 §5 的 F1~F19 **后端全部有实现**（`tests/test_api_feature_switches.py` 有一条从 HTTP
+打到节点的真实链路冒烟，其余按功能分文件）。剩下的边界是"每条功能各自不做什么"：
+
+| 功能 | 边界（不是 bug，是刻意范围） |
+|---|---|
+| F11 术语解释 | 词表是**人工维护**的几十条，未命中返回 `known=false` 而不让模型现场编一个定义。覆盖面换可信度 |
+| F12 演进时间线 | `addresses_gap`（谁补了谁的坑）只在 `citation_edges` 里有引用边证据时才非空。**不用年份先后推断演进关系** |
+| F13 单篇深挖 | 只在该篇 chunks 上作答；取不到支撑就回答"内容不足以回答"，实验细节层面的问题仍不答（§7 边界） |
+| F15 上传入库 | **只抽文本，不解析版面/表格/公式**；PDF 解析器是可选 extra，没装时上传 .pdf 返回 501 并给出照抄命令 |
+| F16 引用关系 | 边只来自 OpenAlex `referenced_works`；解析不出 arXiv id 的参考文献不建边。需要显式调 `references/build`，不会自动抓 |
+| F19 质量信号 | 分档是人工白名单（判不准就 `preprint`/`unknown`）；趋势需要**多天**采样，只调一次接口拿不到趋势 |
+| F9 追问 | 复用不了已校验证据时返回 `no_evidence`，不会悄悄退化成一次全量研究 |
+
+**还没有对外接口的部分**：语料分页查询（`GET /api/v1/papers`）、评测触发（`/api/v1/eval/run`）、
+独立的成本统计接口 —— 这三件目前分别由 `scripts/load_sample_data.py`、`scripts/run_eval.py`
+和 `GET /api/v1/research/{run_id}` 的 `token_usage` 字段承担。
+另外**Streamlit 面板只接到 F1~F10 那一批**：上面表格里的新接口在界面上还没有控件。
 
 ---
 

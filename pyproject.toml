@@ -73,6 +73,11 @@ eval = [
     "ragas>=0.2.6",
     "datasets>=3.1",
 ]
+# F15 上传自己的 PDF。**故意不放进入选依赖**：默认 `pip install -e .` 就该能跑通主流程，
+# 没装它时上传 .txt/.md 仍然可用，上传 .pdf 会返回 501 并给出这条可照抄的命令。
+pdf = [
+    "pypdf>=4.2",
+]
 # LangSmith 追踪
 tracing = [
     "langsmith>=0.1.140",

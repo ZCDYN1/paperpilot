@@ -18,7 +18,7 @@ import structlog
 from fastapi import FastAPI
 
 from app import __version__
-from app.api.v1 import health, research
+from app.api.v1 import health, papers, research, terms
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.core.resilience import BREAKER_HTTP, BREAKER_LLM, get_breaker
@@ -98,6 +98,8 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     # 业务路由统一挂 /api/v1（架构 §7）
     app.include_router(research.router, prefix="/api/v1")
+    app.include_router(papers.router, prefix="/api/v1")
+    app.include_router(terms.router, prefix="/api/v1")
 
     return app
 

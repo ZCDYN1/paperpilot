@@ -141,11 +141,18 @@ def _cost_block(run: ResearchRun, usages: list[TokenUsage]) -> str:
     return "\n".join(lines)
 
 
-async def render_run_markdown(run_id: str) -> str:
-    """渲染一次运行的完整 Markdown 报告；run 不存在时抛 `RunNotFoundError`。
+async def load_run_facts(run_id: str) -> dict[str, Any]:
+    """一次 run 的全部"事实行"读取 —— `render_run_markdown` 与 F18 相关工作草稿共用。
 
-    内容顺序（对齐产品定义 §4 产出物 A~E）：
-    标题与研究问题 → 对比表 → 综述正文 → 参考文献 → ⚠️ 未支撑结论 → 成本与耗时 → 固定声明。
+    ⚠️ 这就是原来内联在 `render_run_markdown` 里的那段查询的**原样搬家**：
+    谁要改"取哪些行、三态口径、标题兜底"，改这里一处，两个消费者同步生效
+    （F18 不许复制一份取数代码，见 `app/export/related_work.py` 模块 docstring）。
+
+    与搬家前唯一的差异：`titles` 现在同时覆盖 citations **和**对比表里出现的 arxiv_id
+    （F18 需要对比表论文的官方标题）。对 `render_run_markdown` 行为零影响 ——
+    它只按引用行的 id 去查这个 dict，多出来的键从不被读取。
+
+    run 不存在时抛 `RunNotFoundError`（异常约定与导出接口一致）。
     """
     async with db_session.session_scope() as session:
         run = await session.get(ResearchRun, run_id)
@@ -189,14 +196,40 @@ async def render_run_markdown(run_id: str) -> str:
                 .limit(1)
             )
         ).scalar_one_or_none() or ""
-        # 引用涉及的论文标题：库里查不到的（历史数据 / 未入库）就用 arxiv_id 兜底，不编标题。
-        paper_ids = {c.arxiv_id for c in citations if c.arxiv_id}
+        # 引用与对比表涉及的论文标题：库里查不到的（历史数据 / 未入库）就用 arxiv_id 兜底，不编标题。
+        paper_ids = {c.arxiv_id for c in citations if c.arxiv_id} | {
+            r.arxiv_id for r in comparison_rows if r.arxiv_id
+        }
         titles: dict[str, str] = {}
         if paper_ids:
             for pid, title in (
                 await session.execute(select(Paper.arxiv_id, Paper.title).where(Paper.arxiv_id.in_(paper_ids)))
             ).all():
                 titles[pid] = title
+
+    return {
+        "run": run,
+        "citations": citations,
+        "comparison_rows": comparison_rows,
+        "usages": usages,
+        "draft": draft,
+        "titles": titles,
+    }
+
+
+async def render_run_markdown(run_id: str) -> str:
+    """渲染一次运行的完整 Markdown 报告；run 不存在时抛 `RunNotFoundError`。
+
+    内容顺序（对齐产品定义 §4 产出物 A~E）：
+    标题与研究问题 → 对比表 → 综述正文 → 参考文献 → ⚠️ 未支撑结论 → 成本与耗时 → 固定声明。
+    """
+    facts = await load_run_facts(run_id)
+    run = facts["run"]
+    citations = facts["citations"]
+    comparison_rows = facts["comparison_rows"]
+    usages = facts["usages"]
+    draft = facts["draft"]
+    titles = facts["titles"]
 
     sections: list[str] = [
         f"# 文献研究报告：{run.question}".strip(),
@@ -231,4 +264,4 @@ async def render_run_markdown(run_id: str) -> str:
     return "\n\n".join(s.strip() for s in sections if s and s.strip())
 
 
-__all__ = ["RunNotFoundError", "render_run_markdown"]
+__all__ = ["RunNotFoundError", "load_run_facts", "render_run_markdown"]

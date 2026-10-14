@@ -45,15 +45,18 @@ import uuid
 import structlog
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import PlainTextResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from app.agents.graph import open_graph, thread_config
+from app.analysis.timeline import build_timeline
 from app.api.guards import guard_run_id, guard_sub_questions, guard_text
 from app.core.resilience import CircuitOpenError
 from app.db.models import Citation, ResearchRun, ResearchSession
 from app.db.session import session_scope
 from app.export import RunNotFoundError, render_run_markdown
+from app.export.related_work import render_related_work_markdown
+from app.followup import answer_from_read_papers
 from app.observability.events import SSEEmitter
 from app.schemas.research import ResearchRequest
 
@@ -494,3 +497,71 @@ async def export_markdown(run_id: str) -> PlainTextResponse:
         media_type="text/markdown; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="paperpilot-{run_id}.md"'},
     )
+
+
+# --------------------------------------------------------------------------- F18 / F12 / F9
+@router.get("/{run_id}/related-work.md", summary="导出「相关工作」章节草稿（产品定义 F18）")
+async def export_related_work(run_id: str) -> PlainTextResponse:
+    """把一次研究组织成能直接进开题报告"相关工作"一节的草稿。
+
+    与 `export.md` 的区别不是排版，而是**组织方式**：整份报告按产出物 A~E 排，
+    而这里按方法/主题分组（同一类方法放在一起对比），因为"相关工作"这一节的
+    读者要看的正是"这个方向上有几派、各自的问题在哪"。
+    """
+    guard_run_id(run_id)
+    try:
+        text = await render_related_work_markdown(run_id)
+    except RunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"run {run_id} 不存在") from exc
+
+    return PlainTextResponse(
+        text,
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="paperpilot-{run_id}-related-work.md"'
+        },
+    )
+
+
+@router.get("/{run_id}/timeline", summary="方法演进时间线（产品定义 F12）")
+async def run_timeline(run_id: str) -> dict:
+    """按年份排开本次研究涉及的论文，并如实说明"能不能谈演进关系"。
+
+    ⚠️ `addresses_gap`（谁补了谁的坑）只有在 `citation_edges` 里有引用边证据时才非空。
+    没跑过 `POST /api/v1/papers/references/build` 时它恒为空数组 ——
+    这是刻意的：用年份先后推断"后者补了前者的坑"是编故事，不是发现。
+    """
+    guard_run_id(run_id)
+    try:
+        return await build_timeline(run_id=run_id)
+    except RunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"run {run_id} 不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422, detail={"code": "invalid_input", "reason": str(exc)}
+        ) from exc
+
+
+class FollowupBody(BaseModel):
+    """F9 追问的请求体。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(min_length=1, max_length=2000, description="基于这次研究继续问的问题")
+
+
+@router.post("/{run_id}/followup", summary="基于已读论文追问，不重新检索（产品定义 F9）")
+async def followup_on_run(run_id: str, body: FollowupBody) -> dict:
+    """在**上一轮已经读过并校验过的证据**上回答，一次 LLM 调用，不碰索引也不联网。
+
+    这是 F9 里"省"的那一半；`POST /research/stream` 带 `session_id` 是"上下文"那一半
+    （拆解时能看到本会话此前的问答，指代能被补全，但仍会走完整检索链路）。
+    两条路径的分工写在这里而不是混成一个接口，是因为它们的成本与失败模式完全不同：
+    追问复用不了证据时必须**如实返回 no_evidence**，而不是悄悄退化成一次全量研究。
+    """
+    guard_run_id(run_id)
+    question = guard_text(body.question, field="question")
+    try:
+        return await answer_from_read_papers(run_id, question)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=f"run {run_id} 不存在") from exc

@@ -21,8 +21,10 @@ import asyncio
 import re
 import time
 import unicodedata
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
+from typing import Any
 
 import httpx
 import structlog
@@ -43,6 +45,48 @@ _TITLE_STOPWORDS = {
 # 而"标题串成另一篇论文"的相似度普遍在 0.3 以下，中间有一段很宽的安全区。
 _TITLE_SIM_THRESHOLD = 0.70
 # 允许"一个标题是另一个的子集"（如 arXiv 版无副标题），但要求交集足够多才有意义
+# arXiv 前缀形状（`arxiv.org/abs/2305.15334v2`、`10.48550/arXiv.2305.15334`）里抠短 id 用
+_ARXIV_REF_RE = re.compile(
+    r"arxiv\.org/abs/(\d{4}\.\d{4,5})|arxiv\.(\d{4}\.\d{4,5})|arXiv:(\d{4}\.\d{4,5})",
+    re.IGNORECASE,
+)
+# DOI 里用的短 id：新式一律是 `NNNN.NNNNN`，版本号后缀（v3）不属于 DOI 的一部分
+_ARXIV_NEW_ID_RE = re.compile(r"\d{4}\.\d{4,5}")
+# 一次 `filter=openalex_id:W1|W2|…` 最多带多少个 id。OpenAlex 允许上百个值，
+# 但 URL 长度与响应体积在 50 这一档最稳（参考文献常有 150+ 条，必须分批）。
+_RESOLVE_BATCH = 50
+
+
+def _doi_bare(arxiv_id: str) -> str:
+    """把任意形状的 arXiv id 归一成 DOI 里用的那种短 id。
+
+    先按 `NNNN.NNNNN` 抓，是因为调用方传来的形状太杂（`arxiv/2305.15334v3`、
+    `ARXIV:2305.15334`、`2305.15334v10`）；抓不到就退回原样，
+    让老式 id（`cs.CL/0201001`）仍有机会命中它自己的 DOI。
+    """
+    text = (arxiv_id or "").strip()
+    m = _ARXIV_NEW_ID_RE.search(text)
+    return m.group(0) if m else text
+
+
+def arxiv_id_from_work(work: dict) -> str | None:
+    """从一条 OpenAlex work 记录里抠出 arXiv 短 id，抠不到就返回 None。
+
+    三条来源按可信度排序：`ids.arxiv`（官方登记）→ `doi`（arXiv 的 DOI 前缀固定是
+    `10.48550/arXiv.`）→ `primary_location` 里的 URL。
+    ⚠️ 不做"标题像就是一篇"的模糊匹配：引用边会画进关系图里，
+    一条错边比少一条边糟得多（产品定义 §7：宁可留空也不编造）。
+    """
+    if not isinstance(work, dict):
+        return None
+    ids = work.get("ids") or {}
+    for value in (ids.get("arxiv"), work.get("doi"), (work.get("primary_location") or {}).get("url")):
+        if not value:
+            continue
+        m = _ARXIV_REF_RE.search(str(value))
+        if m:
+            return next((g for g in m.groups() if g), None)
+    return None
 _CONTAINMENT_THRESHOLD = 0.90
 _CONTAINMENT_MIN_TOKENS = 6
 
@@ -148,13 +192,18 @@ class OpenAlexClient:
         self._timeout = timeout
         self._client = client
         self._owns_client = client is None
-        # OpenAlex 比 arXiv 宽松得多，不需要 3s；但完全不打间隔容易被共享池限流
-        self._min_interval = 0.2
+        # OpenAlex 比 arXiv 宽松得多，不需要 3s；但完全不打间隔容易被共享池限流。
+        # ⚠️ 读 `OPENALEX_REQUEST_INTERVAL`：这里曾经硬编码 0.2，
+        # 于是配置项存在但改了没任何效果（又一种"字段存在却没接通"）。
+        self._min_interval = float(getattr(self.settings, "openalex_request_interval", 0.2) or 0.2)
         self._last_request_at: float | None = None
-        # 从 arXiv 的 User-Agent 里顺手抠出 mailto —— OpenAlex 的"礼貌池"靠它给更快的配额，
-        # 而 Settings 里没有专门的 openalex 配置项（见交付报告里的配置缺口说明）
-        m = _MAILTO_RE.search(self.settings.arxiv_user_agent or "")
-        self._mailto = m.group(1) if m else None
+        # 礼貌性联系方式：优先用专门的 `OPENALEX_MAILTO`，没填才从 arXiv 的 UA 里抠。
+        # 走"专门配置优先、否则回退"而不是只回退：被限流时用户需要一个能单独调的旋钮。
+        mailto = (getattr(self.settings, "openalex_mailto", "") or "").strip()
+        if not mailto:
+            m = _MAILTO_RE.search(self.settings.arxiv_user_agent or "")
+            mailto = m.group(1) if m else ""
+        self._mailto = mailto or None
 
     # ------------------------------------------------------------------ 生命周期
     async def __aenter__(self) -> OpenAlexClient:
@@ -270,10 +319,98 @@ class OpenAlexClient:
         return None
 
 
+    # ------------------------------------------------------------------ 引用关系（F16）
+    async def fetch_referenced_works(self, arxiv_id: str) -> tuple[str, list[str]] | None:
+        """按 arXiv DOI 精确取这篇论文的 OpenAlex 记录。
+
+        返回 `(openalex_id, [它引用的 work id 列表])`；取不到返回 `None`
+        （调用方一律按"没有引用边证据"处理，**不许**退化成"猜一些相近论文当边"）。
+
+        为什么这里用 DOI 精确匹配而不是复用 `enrich()` 的标题搜索：
+        `10.48550/arXiv.<id>` 是 arXiv 官方 DOI，一条命中、无歧义 ——
+        标题 + 作者交叉校验是给"模糊搜索"兜底的，精确查找不需要它，
+        而且引用边是**结构性事实**，错一条比错一个被引数影响大得多（它会画进图里）。
+        """
+        bare = _doi_bare(arxiv_id)
+        if not bare:
+            return None
+
+        await self._throttle()
+        params: dict = {
+            "filter": f"doi:10.48550/arxiv.{bare}",
+            "per-page": 1,
+            "select": "id,referenced_works",
+        }
+        if self._mailto:
+            params["mailto"] = self._mailto
+        try:
+            resp = await self._ensure_client().get(self._endpoint, params=params)
+            if resp.status_code != 200:
+                logger.warning("openalex.refs_http_error", arxiv_id=bare, status=resp.status_code)
+                return None
+            results = (resp.json() or {}).get("results") or []
+        except Exception as exc:  # noqa: BLE001 - 补充源一律不致命
+            logger.warning("openalex.refs_request_failed", arxiv_id=bare, error=str(exc)[:200])
+            return None
+
+        if not results:
+            logger.info("openalex.refs_no_work", arxiv_id=bare)
+            return None
+        work = results[0]
+        wid = str(work.get("id", "")).rsplit("/", 1)[-1]
+        refs = [str(r).rsplit("/", 1)[-1] for r in (work.get("referenced_works") or []) if r]
+        if not wid or not refs:
+            return None
+        logger.info("openalex.refs_fetched", arxiv_id=bare, work=wid, refs=len(refs))
+        return wid, refs
+
+    async def resolve_arxiv_ids(
+        self, work_ids: Sequence[str]
+    ) -> dict[str, dict[str, Any]]:
+        """把 OpenAlex work id 批量翻成 `{work_id: {"arxiv_id": str|None, "title": str}}`。
+
+        分批（每批 50 个）而不是把整串 id 拼进一个 URL：一篇论文的参考文献可以有 150+ 条，
+        超长 query 会被 OpenAlex 以 400 拒掉，而 400 里看不出"是太长"还是"格式错"。
+        翻不出 arXiv id 的条目**照样返回**（`arxiv_id=None`）—— 调用方需要知道
+        "这条参考文献存在、只是不在 arXiv 上"，与"这条没查到"是两件事。
+        """
+        out: dict[str, dict[str, Any]] = {}
+        ids = [str(w).strip() for w in (work_ids or []) if str(w).strip()]
+        for start in range(0, len(ids), _RESOLVE_BATCH):
+            batch = ids[start : start + _RESOLVE_BATCH]
+            await self._throttle()
+            params: dict = {
+                # OpenAlex 的多值 OR 过滤是 `filter=openalex_id:W1|W2|…`，键名前缀不能漏
+                "filter": "openalex_id:" + "|".join(batch),
+                "select": "id,doi,title,display_name,ids",
+            }
+            if self._mailto:
+                params["mailto"] = self._mailto
+            try:
+                resp = await self._ensure_client().get(self._endpoint, params=params)
+                if resp.status_code != 200:
+                    logger.warning(
+                        "openalex.resolve_http_error", batch=len(batch), status=resp.status_code
+                    )
+                    continue
+                for work in (resp.json() or {}).get("results") or []:
+                    wid = str(work.get("id", "")).rsplit("/", 1)[-1]
+                    if not wid:
+                        continue
+                    out[wid] = {
+                        "arxiv_id": arxiv_id_from_work(work),
+                        "title": work.get("title") or work.get("display_name") or "",
+                    }
+            except Exception as exc:  # noqa: BLE001 - 补边失败不影响已入库的语料
+                logger.warning("openalex.resolve_failed", batch=len(batch), error=str(exc)[:200])
+        return out
+
+
 __all__ = [
     "OPENALEX_WORKS_ENDPOINT",
     "OpenAlexClient",
     "OpenAlexMetrics",
+    "arxiv_id_from_work",
     "title_similarity",
     "validate_match",
 ]
