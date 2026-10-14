@@ -60,6 +60,23 @@ from app.core.config import get_settings
 
 logger = structlog.get_logger(__name__)
 
+# F17 输出语言切换（口径与 writer 节点一致）：只显式认识 zh / en，
+# 其余取值把语言码原样写进指令；缺省 zh，与加 language 字段之前的行为完全一致。
+# ⚠️ 非中文语言下 `_ground` 的锚点词校验同样成立（锚点本来就是英文/数字）。
+
+
+def _output_language(state: ResearchState) -> str:
+    return (state.get("language") or "zh").strip().lower() or "zh"
+
+
+def _field_language_rule(lang: str) -> str:
+    """渲染 comparator prompt 里的 `{{FIELD_LANGUAGE_RULE}}` 占位符。"""
+    if lang == "en":
+        return "片段是英文，字段值同样用**英文**描述；"
+    if lang == "zh":
+        return "片段是英文，字段值用**中文**描述；"
+    return f"片段是英文，字段值用 {lang} 描述；"
+
 # 需要逐字段回原文校验的**自由文本**列。
 # （其余四列 `code_url / venue / cited_by_count / cited_at` 由代码权威覆盖，模型说了不算，
 #   见 `_row_from` 的"权威覆盖"段。）
@@ -315,7 +332,11 @@ async def compare_node(state: ResearchState) -> dict:
         else ""
     )
     messages = [
-        SystemMessage(content=load_prompt("comparator")),
+        SystemMessage(
+            content=load_prompt("comparator").replace(
+                "{{FIELD_LANGUAGE_RULE}}", _field_language_rule(_output_language(state))
+            )
+        ),
         HumanMessage(
             content=(
                 f"研究问题：{state.get('question', '')}\n\n"

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from typing import Literal
 
@@ -21,6 +22,31 @@ from app.schemas.retrieval import ARXIV_CATEGORIES, normalize_english_keywords
 
 _MIN_YEAR = 1991
 _MAX_YEAR = 2100
+
+# F14「指定论文对比」的 id 形状：新式短 id（2305.15334），容忍 `v2` 版本后缀。
+# 之所以强制短 id 而不是整条 URL：`papers` 表主键就是无版本短 id
+# （理由见 arxiv_client.parse_arxiv_id），过滤最终要落到它上面。
+_ARXIV_ID_RE = re.compile(r"^(\d{4}\.\d{4,5})(?:v\d+)?$")
+
+
+def normalize_arxiv_ids(values: list[str]) -> list[str]:
+    """校验论文 id 形状、剥离版本后缀、按序去重。
+
+    `ResearchFilters.arxiv_ids` 与 `ResearchRequest.arxiv_ids` 两个入口共用，
+    与 `normalize_english_keywords` 同一个思路：同一条不变量不允许在两处校出两种口径。
+    """
+    out: list[str] = []
+    bad: list[str] = []
+    for raw in values:
+        m = _ARXIV_ID_RE.match((raw or "").strip())
+        if not m:
+            bad.append(raw)
+            continue
+        if m.group(1) not in out:
+            out.append(m.group(1))
+    if bad:
+        raise ValueError(f"非法的 arXiv 论文 id：{bad}。形如 2305.15334（可带 v2 版本后缀）")
+    return out
 
 
 class ResearchFilters(BaseModel):
@@ -33,6 +59,17 @@ class ResearchFilters(BaseModel):
     )
     year_gte: int | None = Field(default=None, ge=_MIN_YEAR, le=_MAX_YEAR)
     year_lte: int | None = Field(default=None, ge=_MIN_YEAR, le=_MAX_YEAR)
+    has_code: bool | None = Field(
+        default=None,
+        description=(
+            "是否有开源仓库（F2 第三类过滤）：true=只召回 arXiv 元数据里**确认**有仓库链接的论文；"
+            "false=只召回未确认有链接的论文；不传=不过滤。口径见 `HybridSearchArgs.has_code`"
+        ),
+    )
+    arxiv_ids: list[str] = Field(
+        default_factory=list,
+        description="F14：把研究限定在这几篇论文里（形如 2305.15334，可带版本后缀，会被剥离）",
+    )
 
     @field_validator("categories")
     @classmethod
@@ -41,6 +78,11 @@ class ResearchFilters(BaseModel):
         if bad:
             raise ValueError(f"不支持的 arXiv 分类：{bad}")
         return v
+
+    @field_validator("arxiv_ids")
+    @classmethod
+    def _check_arxiv_ids(cls, v: list[str]) -> list[str]:
+        return normalize_arxiv_ids(v)
 
     @model_validator(mode="after")
     def _check_year_range(self) -> ResearchFilters:
@@ -55,12 +97,66 @@ class ResearchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     question: str = Field(min_length=1, max_length=2000, description="研究问题")
+    # ★ F9「会话内追问」：可选的会话加入凭证。
+    # 传了 → 本次提问挂进这个会话，能读到该会话此前的问答（短期记忆）；
+    # 不传 → 与改动前完全一致（`session_id = run_id`，一次提问即一个会话）。
+    # 字符集与 `guards.RUN_ID_RE` 同口径：这个值会直接当 `sessions.id` 主键写库，
+    # 裸 `/`、空白、控制字符进主键和外键是给自己找麻烦（路径穿越式输入尤其）。
+    session_id: str | None = Field(
+        default=None,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9._-]+$",
+        description="要加入的会话 id（追问时传上一轮 `run_started` 所在会话的 id）；留空表示新开会话",
+    )
     filters: ResearchFilters | None = Field(default=None, description="语料 metadata 过滤")
+    # F14「指定 2~3 篇论文只做对比」：顶层便利入口，值会自动并进 `filters.arxiv_ids`。
+    # 为什么要并进 filters 而不是单独再传一条通道：API 层只把 `filters.model_dump()`
+    # 喂进图 state（`_initial_state`），检索/抓取两侧都从那里取 —— 并进既有的
+    # 过滤通道，两处下游无需感知新顶层字段。
+    arxiv_ids: list[str] = Field(
+        default_factory=list,
+        description="限定研究的论文 id 列表（形如 2305.15334）；非空时检索只在这些论文里做",
+    )
+    language: Literal["zh", "en"] = Field(
+        default="zh",
+        description="研究报告的输出语言。zh=中文（默认，主用法「中文提问→检索英文论文」），en=英文",
+    )
     top_k: int = Field(default=8, ge=1, le=50, description="每个子问题召回的论文数上限")
     rerank: bool = Field(
         default=True,
         description="是否启用交叉编码器重排；延迟敏感场景可关闭（消融表需要量化这个权衡）",
     )
+
+    @field_validator("session_id", mode="before")
+    @classmethod
+    def _blank_session_is_new_session(cls, v: object) -> object:
+        """`""` / 全空白 = "不加入任何会话"，而不是形状错误。
+
+        面板类客户端常常是"有会话就带上、没有就传空串"，把空串判成 422 会让
+        首次提问（新会话）直接失败，而这个请求本身完全合法。
+        """
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+    @field_validator("arxiv_ids")
+    @classmethod
+    def _check_arxiv_ids(cls, v: list[str]) -> list[str]:
+        return normalize_arxiv_ids(v)
+
+    @model_validator(mode="after")
+    def _merge_arxiv_ids_into_filters(self) -> ResearchRequest:
+        """把顶层 `arxiv_ids` 并进 `filters.arxiv_ids`（两处都给时取并集，保序）。
+
+        没有这一步，顶层字段会在 `_initial_state` 的 `filters.model_dump()` 处丢失 ——
+        请求侧承诺的 F14 就又回到"检索层支持但传不进去"的原状。
+        """
+        if self.arxiv_ids:
+            if self.filters is None:
+                self.filters = ResearchFilters()
+            merged = normalize_arxiv_ids([*self.filters.arxiv_ids, *self.arxiv_ids])
+            self.filters.arxiv_ids = merged
+        return self
 
 
 class SubQuestion(BaseModel):

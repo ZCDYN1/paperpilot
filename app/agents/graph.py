@@ -56,6 +56,29 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 # 条件边路由函数（不是节点）
 # ---------------------------------------------------------------------------
+# ★ Send 分支能看见的 state **只有 payload 里的那些键** —— 全局通道不会自动带过去。
+# 这是 LangGraph 的语义，不是 bug，但它造成过一个真实的功能性缺口：payload 里只带
+# `sub_question` + `session_id` 时，retrieve 节点里的 `state.get("filters")` 永远是空，
+# 于是请求级的年份 / has_code / 指定论文集合、以及 `top_k` / `rerank` 开关，
+# 在**离用户意图最近的那一步**被整体丢掉（不报错，只是过滤和开关没生效）。
+_BRANCH_KEYS = ("session_id", "question", "filters", "top_k", "rerank", "language")
+
+
+def _worker_payload(state: ResearchState, sub_question: Any) -> dict[str, Any]:
+    """装配单个检索分支的入参：子问题 + 它需要读到的那几条请求级配置。
+
+    只挑"分支会读的键"而不是整个 state 拷过去：分支不该看见 `retrieved` / `citations`
+    这类上游产出（带 reducer 的通道被 payload 覆盖会打乱汇合语义），
+    而且 payload 是可进 checkpoint 的小对象，塞整份 state 等于每个分支复制一遍语料。
+    """
+    payload: dict[str, Any] = {"sub_question": sub_question}
+    for key in _BRANCH_KEYS:
+        value = state.get(key)
+        if value is not None:
+            payload[key] = value
+    return payload
+
+
 def route_after_corpus(state: ResearchState) -> list[Send] | str:
     """语料保障之后：充足则扇出并行检索，不足则降级直接写作。
 
@@ -70,7 +93,7 @@ def route_after_corpus(state: ResearchState) -> list[Send] | str:
 
     sub_questions = state.get("sub_questions") or []
     return [
-        Send("retrieve", {"sub_question": sq, "session_id": state.get("session_id", "")})
+        Send("retrieve", _worker_payload(state, sq))
         for sq in sub_questions
     ]
 
@@ -78,13 +101,12 @@ def route_after_corpus(state: ResearchState) -> list[Send] | str:
 def route_revision_workers(state: ResearchState) -> list[Send]:
     """`revise` 之后同样用 Send 扇出（修正点 3）。
 
-    入参只带 `sub_question` + `session_id`：Send 的入参是**该分支的私有 state 覆盖**，
-    多带字段没有意义（全局 state 本来就能读到），少带 `sub_question` 则是致命的。
+    入参见 `_worker_payload`：子问题之外还要带上请求级配置，
+    否则反思补检索这一路会把用户原本的过滤条件整个丢掉（第一轮带了、重跑反而不带了）。
     """
     revision_sub_questions = state.get("revision_sub_questions") or []
     return [
-        Send("retrieve", {"sub_question": sq, "session_id": state.get("session_id", "")})
-        for sq in revision_sub_questions
+        Send("retrieve", _worker_payload(state, sq)) for sq in revision_sub_questions
     ]
 
 

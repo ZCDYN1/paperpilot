@@ -150,6 +150,14 @@ class ArxivClient:
         page_size: int = 100,
     ) -> None:
         self.settings = settings or get_settings()
+        # arXiv 的接入政策要求 UA 里带可用联系方式。默认值里那个 `you@example.com`
+        # 是**样例占位**：新 users 常直接 clone 就开跑，UA 因此是一个人人都会漏掉的占位邮箱，
+        # 后果是被限流甚至封 IP。所以只在真的联网抓之前提醒一次，而不是藏在 README 某一行里。
+        if "you@example.com" in (self.settings.arxiv_user_agent or ""):
+            logger.warning(
+                "arxiv.user_agent_placeholder",
+                hint="请把 ARXIV_USER_AGENT 里的 you@example.com 换成你的邮箱（arXiv 要求 UA 含联系方式）",
+            )
         self._endpoint = endpoint
         # arXiv 单页上限 100（调大不会更快，只会被限流）
         self.page_size = max(1, min(int(page_size), 100))

@@ -372,6 +372,15 @@ def decide_after_verify(state: ResearchState) -> Literal["pass", "revise", "give
 用 `asyncio.gather` 的话，一个分支挂了整个节点就挂，且在 LangSmith 上看不到分支粒度。
 这是选择 LangGraph 而非手写调度循环的核心理由。
 
+> ⚠️ **代价：`Send` 的 payload 就是那个分支的全部 state**，全局通道不会自动带进来。
+> 这条语义造成过一次真实的功能缺口 —— payload 里只带 `sub_question` 时，
+> retrieve 节点读到的 `state["filters"]` 是空的，于是用户设的年份 / 分类 / 是否有代码 /
+> 指定论文集合在**离意图最近的那一步**整体消失，而且不报错、只是"过滤好像没生效"。
+> 现在由 `app/agents/graph.py::_worker_payload` 统一装配分支入参
+> （`sub_question` + `session_id` + `question` + `filters` + `top_k` + `rerank` + `language`），
+> 回归钉子在 `tests/test_api_feature_switches.py`。
+> 加新的请求级配置时，**这里是要改的第二处**（第一处是 `_initial_state`）。
+
 **② `SqliteSaver` 解决什么问题？**
 - 长任务中断恢复：用户关掉浏览器，`thread_id` 不变即可从最后一个 checkpoint 续跑
 - `interrupt_before=["write"]`：写作前暂停，把大纲推给用户确认（前端点"确认"后
@@ -494,6 +503,19 @@ reranked = reranker.rerank(question, paper_buckets.flatten_texts(), top_n=8)  # 
 > 因此 §5.3 消融表里的 `Recall@5`、`nDCG@10` 均指 **论文级**（先 chunk 检索 → paper 聚合 → 再算指标），
 > 否则同一个数字在两处含义不同，消融表会失去说服力。
 
+> **同样容易混的是两个 `top_k`**（这条曾经是真故障，不是理论风险）：
+> `search(top_k=…)` 是**每一路各召回多少 chunk**（由 `RETRIEVE_TOP_K` 决定，默认 50），
+> 而请求体与 `HybridSearchArgs` 里的 `top_k` 是**最终留几篇论文**（映射到 `rerank_top_n`）。
+> 早期版本把后者直接传给前者，线上每路只召回 8 条就去融合，
+> 而 §5.3 的消融表量的是每路 50 条 —— 等于对外公布了一条产品没在跑的链路。
+> 现在这层映射写在 `app/agents/tools/hybrid_search.py::run_hybrid_search`，并由
+> `tests/test_retrieval_request_switches.py` 钉住。
+>
+> 过滤条件同理有三类（分类 / 年份 / 是否有代码）。`has_code` 是**入库时**从 arXiv 官方
+> `comment`/`abstract` 里检测开源仓库链接得到的（D7：文本类事实只采信官方元数据），
+> 检测不到就留 `None`；`has_code=false` 的过滤把 `None` 视作"未见链接"纳入，
+> 而 `has_code=true` 要求有实证 —— 真阳性必须能指出链接，"没见过"不等于"有"。
+
 **RRF 为什么优于加权求和**：
 BM25 分数是无上界的正数（可能 0.3 也可能 28.7），余弦相似度是 [-1, 1]。
 直接 `0.5*a + 0.5*b` 意味着 BM25 天然主导结果，除非先归一化——而归一化又依赖分布假设
@@ -546,17 +568,22 @@ RRF 只用**排名**：`Σ 1/(k + rank)`，量纲问题被彻底绕过，且对�
 
 ## 7. API 设计
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| POST | `/api/v1/research/stream` | **核心**：SSE 流式研究，返回 `text/event-stream` |
-| POST | `/api/v1/research/{run_id}/resume` | HITL 恢复（用户确认大纲后继续） |
-| GET | `/api/v1/research/{run_id}` | 查询 run 状态与最终报告 |
-| GET | `/api/v1/research/{run_id}/citations` | 拿引用证据链（前端画溯源卡片） |
-| POST | `/api/v1/papers/ingest` | 按 arxiv_id / 关键词批量入库建索引 |
-| GET | `/api/v1/papers` | 分页查询语料（支持 metadata 过滤） |
-| POST | `/api/v1/eval/run` | 触发 RAGAS 评测（后台任务） |
-| GET | `/api/v1/metrics/tokens` | Token / 成本统计 |
-| GET | `/healthz` | 健康检查（含 FAISS 索引是否加载、模型是否就绪） |
+| 方法 | 路径 | 说明 | 实现状态 |
+|---|---|---|---|
+| POST | `/api/v1/research/stream` | **核心**：SSE 流式研究，返回 `text/event-stream` | ✅ |
+| POST | `/api/v1/research/{run_id}/resume` | HITL 恢复（用户确认拆解后继续） | ✅ |
+| GET | `/api/v1/research/{run_id}` | 查询 run 状态与最终报告 | ✅ |
+| GET | `/api/v1/research/{run_id}/citations` | 拿引用证据链（前端画溯源卡片） | ✅ |
+| GET | `/api/v1/research/{run_id}/export.md` | 导出 Markdown 报告（F8，含对比表与参考文献） | ✅ |
+| GET | `/healthz` | 健康检查（含 FAISS 索引是否加载、模型是否就绪） | ✅ |
+| GET | `/resilience` | 熔断器实时状态（运维排查用） | ✅ |
+| POST | `/api/v1/papers/ingest` | 按 arxiv_id / 关键词批量入库建索引 | ⏳ 待实现（现在由 `ensure_corpus` 节点与 `scripts/build_index.py` 承担） |
+| GET | `/api/v1/papers` | 分页查询语料（支持 metadata 过滤） | ⏳ 待实现 |
+| POST | `/api/v1/eval/run` | 触发 RAGAS 评测（后台任务） | ⏳ 待实现（现在走 `scripts/run_eval.py`） |
+| GET | `/api/v1/metrics/tokens` | Token / 成本统计 | ⏳ 待实现（现在随 `GET /research/{run_id}` 返回） |
+
+> 「实现状态」这一列是刻意加的：上面这张表最初是**设计目标**，不是清单快照。
+> 一张看起来都像已实现的表会让人照着写前端，然后在 404 上花掉半天。
 
 ### SSE 实现要点
 
@@ -619,6 +646,13 @@ async def research_stream(req: ResearchRequest):
 | `token_usage` | 全流程结束 | `total`, `cost_estimate`, `by_node{}` |
 | `error` | 任何异常 | `node`, `code`, `message`, `recoverable` |
 | `done` | 流结束 | `run_id`, `status` |
+| `citation_rescue` | read / verify 各自完成引用定位后 | `node`(read\|verify), `checked`, `rescued`, `dropped`, `recovered_by{}`, `drop_reasons{}` |
+
+> **`citation_rescue` 是第 16 种事件**，追加在末尾以不打乱上面 15 项与本文档的逐条对应关系。
+> 它把 `Resolution.how`（§10.1 的三条定位路径）与 verify 侧重锚的统计从后端日志搬到对外契约上：
+> 此前这些数字只存在于 `read.done` 日志里，事后想知道"这批引用当初怎么定位上的"只能 grep 服务端日志。
+> ⚠️ **`rescued=0` 也必须发**：根因修掉之后 0 就是常态，只在非零时出现的事件
+> 无法区分"根因确实修好了"与"统计断线了"，而这条事件存在的意义正是随时验证修复没有回退。
 
 > **事件契约需带版本**：建议每个事件 data 里带 `schema_version: "1"`，
 > 前端（Streamlit 或未来的 Web 前端）据此做兼容判断 —— SSE 协议一旦上线就是对外契约，
@@ -630,6 +664,8 @@ async def research_stream(req: ResearchRequest):
 - `token` → 增量拼进 `st.empty()` 占位符，做打字机效果
 - `retrieval` → 右侧栏列出召回片段 + 分数条
 - `verification` → 显示"校验不通过，退回重写（第 1 次）"，这是用户最能感知到 Agent 在工作的时刻
+- `citation_rescue` → 时间线追加一行"引用定位（抽取侧/校验侧）：检查 N 条 · 救回 M（路径：…）· 剔除 K"，
+  0 也照显（理由见上表下方）
 
 ---
 
@@ -638,15 +674,83 @@ async def research_stream(req: ResearchRequest):
 **短期记忆**（`messages` 表 + LangGraph state）
 - 保留最近 N 轮原文 + 更早轮次的**摘要**（滚动压缩）
 - 跨 run 复用：同一 `session_id` 的新问题能带上之前读过哪些论文
+- ⚠️ **待办**：写入已接通（`finalize` 追加本轮问答），**读回尚未接线** ——
+  `load_context` 目前只被单测调用，没有节点把它注入 prompt，
+  因此产品定义 F9「会话内追问」还不可用。
 
-**长期记忆**（`long_term_memories` 表 + 独立 FAISS 索引）
+**长期记忆**（`long_term_memories` 表）
+向量以 `np.float32` BLOB 存在同一张表里，召回时线性扫描算余弦（embedder 已 L2 归一化，
+点积即余弦）。**没有独立的向量索引**：条数上界由下面的淘汰机制保证（默认全局 200 条），
+在这个量级上线性扫描比再维护一个 FAISS 索引更简单，也不会有"两边不同步"的问题。
+
 写入时机：`finalize` 节点
 - 用户关注的子方向（如长期检索 RAG 与 Agent 相关论文）
-- 已读论文清单（避免重复召回）
+- 已读论文清单（避免重复精读）
 - 输出格式偏好（偏好表格对比、要求标注代价）
 
-召回时机：`plan` 节点开始时，检索与当前问题相关的记忆注入 prompt
+### 9.1 ★ 读取与淘汰一律跨会话（踩过的坑）
+
+`app/api/v1/research.py:136` 是 `session_id = run_id` —— **一次提问就是一个新会话**
+（那行注释写着"后续「会话内追问」会复用同一个 session_id"，但复用链路属于 F9，尚未接线）。
+而长期记忆要等 `finalize` 才写入，于是：
+
+> 按当前 `session_id` 过滤 = 在"这次运行还没写过任何记忆"的时刻查这次运行的记忆 = **恒为空**。
+
+实测印证：库里 34/36 个 run 满足 `session_id == id`；25 个记忆 session_id 有 24 个就是 run_id。
+后果是"长期记忆已接线"在按会话过滤的写法下**接了线但读不到东西**——`plan` 的召回与
+`read` 的已读排除双双静默空转，而单测全绿（它们把记忆读取打了桩），靠 review 发现不了。
+连带第三个后果：`evict` 若也按会话计数，每个新会话都从 0 开始，200 条上限永不触发
+（实测库里积到 157 行而未淘汰过一次），本节末尾警告的"越用越慢、越用越吵"就会真的发生。
+
+所以语义定为：**长期记忆属于用户，不属于某次会话**。"上次读过这篇""长期关注 RAG 方向"
+换个会话依然成立 —— 产品定义 F10 的原话也是"**下次**不重复推荐"，不是"本会话内不重复推荐"。
+`session_id` 照写，用途是来源追溯与将来多用户时的隔离位，不是读取过滤条件。
+（若将来真做多用户，这里必须换成显式的 user id，否则记忆会跨用户串。）
+
+### 9.2 两条读取口径不能互相替代
+
+| 用途 | 读取方式 | 落点 |
+|---|---|---|
+| 影响问题拆解 | `recall(question, top_k=5)` —— 向量语义召回，要的是"与本次问题相关的历史" | `plan` 节点注入 prompt |
+| 避免重复精读 | `read_paper_ids()` —— 按类型取**全集**，不走向量 | `read` 节点选篇 |
+
+★ 为什么"避免重复精读"不能复用向量召回：`recall` 只返回 top-k 最相关的，
+上次为**别的**子问题读过、与本次问题语义不近的那篇就召不回来，于是被再精读一遍 ——
+而这恰好是该机制要消灭的行为。排除类判断要的是集合完整性，不是相关性排序
+（`app/memory/long_term.py:read_paper_ids`，回归测试 `tests/test_read_paper_exclusion.py`）。
+
+模块级入口 `safe_read_paper_ids()` **刻意不接受 session_id 参数**：没有这个参数，
+就没法把 §9.1 那个"按会话过滤 → 恒为空"的坑再写回来。
+
+### 9.3 排除的作用范围刻意收窄
+
+已读论文只在"派哪几篇进精读"时让出候选位（`nodes/_common.prioritize_unread`：
+**稳定分区**，组内保持重排序不变，不引入新的打分口径；**不剔除**），
+`state["retrieved"]` 一篇都不删。
+
+因为 `retrieved` 另有五个消费者：verify 用它建"合法 chunk 全集"（`chunk_index`）、
+compare / write 用它做对比与成稿、finalize 用它算"本次覆盖 N 篇"、revise 用它重建候选。
+在选篇这一步顺手删它，等于同时改掉了校验口径和报告里的数字 —— 那才是难查的回归。
+
+未读论文不足 `read_top_k`（精读篇数，`app/core/config.py` + `.env.example`）时，已读的按原顺序补位："读过"不等于"与新问题无关"。
+生效情况从日志 `read.prioritized_unread` 观测，其中 `reused_read>0` 即表示发生了补位。
+
+⚠️ **小语料上这个功能会饱和**，这是实测结论而不是推测：sample_data 只有 24 篇，
+其中 19 篇已被历史运行标记为已读（拆开看：18 篇来自真实运行、1 篇来自验证脚本的合成会话）。
+一次真实 ollama 端到端跑出来的日志是 `known_read=19 reused_read=8 selected=8` ——
+检索回来的 15 篇候选里一篇未读的都没有，于是 8 个精读位全部由已读论文补位，
+功能虽然正确执行、却带不来任何新论文。语料扩到 200 篇之后这个比例才会降到有意义的水位；
+在那之前，判断它是否生效要看 `known_read>0`（按会话过滤那个 bug 会让它恒为 0，
+而且因为日志行被 `if read_ids:` 包着，**整行都不会出现**）。
+
+⚠️ 与此配套的一条约束：`finalize._read_paper_ids` 只认 `state["readings"]`（真精读过的），
+**不得**在 `readings` 为空时退回 `retrieved`。退回等于把"这次什么都没读成"记成
+"这 24 篇全读过了"，而这条记忆现在会真的把下一次运行的候选压掉 —— 一次降级运行
+就能让后续运行持续拿不到候选，形成负反馈。
+
 **注意**：长期记忆必须有 `importance` 和 `last_used_at` 并做淘汰，否则越用越慢、越用越吵。
+`read_paper_ids` 刻意**不刷新** `last_used_at`：它是一次索引查询，不是"用到了这条记忆的内容"。
+若在此续命，已读记忆会因为被反复查询而永不被淘汰，把容量占满、顶掉真正该长期保留的偏好类记忆。
 
 ---
 
@@ -757,6 +861,19 @@ async def research_stream(req: ResearchRequest):
 - 用 LangChain callback 在每次 LLM 调用后累加，**按 node 维度聚合**（`token_meter.py`）
 - 落 `token_usage` 表，UI 展示"本次研究消耗 42,180 tokens / 约 ¥0.63"
 - 目的：让使用者能判断这个任务是否值得跑、成本瓶颈在哪个节点
+
+### 换 provider 之前先读 README 的《已知边界与换真实 API 时的排查点》
+
+那节记录的是**实测结论**，刻意只维护一份以免两处漂移：
+provider/model/base_url/key 四项必须同改；`0.61`（18 条引用）与 `0.35`（26 条引用）两个数
+配合 `resolution_how` 全为 `exact` 才是完整归因 —— 失败在模型引文保真度，不在引用定位；
+小语料下 F10 的已读排除没有发挥空间（`known_read=19 reused_read=8 selected=8`）。
+
+**排查顺序**（数字掉了先分归属，别直接动校验阈值）：
+1. 查 `citations` 的 `resolution_how` 分布：非 `exact` 占比上升 → 定位契约被改动（§10.1）；
+2. 仍全是 `exact` 但 `verified` 偏低 → 模型侧，属已知边界；
+3. `read.prioritized_unread` 整行不出现 → 已读清单读到了空集，先怀疑 §9.1 的会话过滤问题；
+4. 第一次 LLM 调用就失败 → 四项配置没同改（模型名与 provider 不匹配）。
 
 ---
 

@@ -16,10 +16,10 @@
   配假 key 时 `LANGCHAIN_*` 确实进了 `os.environ`（并且经真实 lifespan 走一遍）。
 
 ## 用法
-    # 必须用项目 conda 环境（base 缺 structlog）
-    C:/Users/28163/.conda/envs/paperpilot/python.exe scripts/verify_wiring.py
-    C:/Users/28163/.conda/envs/paperpilot/python.exe scripts/verify_wiring.py --only A
-    C:/Users/28163/.conda/envs/paperpilot/python.exe scripts/verify_wiring.py --port 8021 --skip-b
+    # 用装齐依赖的那个解释器（conda base 缺 structlog 就会 import 失败）
+    python scripts/verify_wiring.py
+    python scripts/verify_wiring.py --only A
+    python scripts/verify_wiring.py --port 8021 --skip-b
 
 ## 输出
 控制台只打 ASCII（Windows 控制台是 GBK，中文会乱码），

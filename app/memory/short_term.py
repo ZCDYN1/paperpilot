@@ -12,6 +12,14 @@
 而不是放内存：会话是跨进程、跨 run 的（用户关掉浏览器再来，或换个 worker 起服务）。
 放内存里一重启就丢，而摘要恰恰是"最贵"的那部分（它是历史信息的浓缩物）。
 落到 `messages` 表，天然跟着会话走，也和架构 §9「短期记忆落 messages 表」一致。
+
+## 两个入口现在各是谁在用（F9 接线之后才成立的事实）
+- 写：`append_message` ← `finalize` 节点，每轮落"用户提问 + 最终报告"两条；
+- 读：`load_context` ← `plan` 节点（`app/agents/nodes/planner.py` 的
+  `_recall_session_history`），把本会话此前的问答注入拆解子问题的 prompt。
+读之前这里**只有单测在调**，所以"会话内追问"（产品定义 F9）实际不可用：数据一直在写，
+却没有人把它读回来。改这块时请记住**写与读是同一个窗口的两端**，
+窗口/摘要标记（`SUMMARY_NODE`）只能有一处定义。
 """
 
 from __future__ import annotations

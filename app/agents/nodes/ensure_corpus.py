@@ -46,6 +46,7 @@ async def load_corpus() -> tuple[list[ChunkRecord], dict[str, str]]:
         titles = {p.arxiv_id: p.title for p in papers}
         years = {p.arxiv_id: (p.published.year if p.published else None) for p in papers}
         categories = {p.arxiv_id: p.primary_category for p in papers}
+        has_codes = {p.arxiv_id: p.has_code for p in papers}
         rows = (
             (await session.execute(select(PaperChunk).order_by(PaperChunk.id))).scalars().all()
         )
@@ -61,6 +62,9 @@ async def load_corpus() -> tuple[list[ChunkRecord], dict[str, str]]:
             year=years.get(row.arxiv_id),
             primary_category=categories.get(row.arxiv_id),
             page=row.page,
+            # 没有这一行，has_code 过滤在"节点重建的索引"上永远查不到真阳性 ——
+            # DB 里有值但没进索引元数据，又是一类"字段存在却没接通"的静默缺口
+            has_code=has_codes.get(row.arxiv_id),
         )
         for row in rows
     ]
@@ -86,9 +90,32 @@ def build_ingest_query(state: ResearchState) -> str:
 
 
 def collect_categories(state: ResearchState) -> list[str] | None:
-    """子问题里出现的分类约束（去重）。`None` 表示不限制分类。"""
-    cats = [sq.get("category") for sq in (state.get("sub_questions") or []) if sq.get("category")]
-    return sorted(set(cats)) or None
+    """分类约束：子问题分类 ∪ API 请求 filters 里的全局分类（去重）。
+
+    并集是安全的：arXiv 查询侧的 `cat:` 子句是 OR 集合（见 arxiv_client._build_query），
+    两个来源的分类不互相排斥。此前只取子问题分类，请求侧 filters.categories
+    在**抓取环节**被整个忽略 —— 抓回来的语料与过滤条件无关，白耗限速配额。
+    `None` 表示不限制分类。
+    """
+    cats = {sq.get("category") for sq in (state.get("sub_questions") or []) if sq.get("category")}
+    cats |= {c for c in (state.get("filters") or {}).get("categories") or [] if c}
+    return sorted(cats) or None
+
+
+def collect_ingest_params(state: ResearchState) -> dict:
+    """把请求 filters 翻成 `ingest()` 的抓取参数（F2 承诺在抓取侧落地）。
+
+    - 年份区间走 arXiv 的 `submittedDate:[...]`，能**真正减少抓取量**（限速环境下最值钱的优化）；
+    - `has_code` 不在这张表上：它不是 arXiv 查询接口的可过滤字段，只能在入库时检测元数据、
+      在检索时由 `_prefilter` 兑现 —— 为此把抓取改成"多抓再筛"反而更烧配额。
+    仍不引入任何并发：抓取全程串行（§2.2 / D11），这里只是收窄同一个串行请求的条件。
+    """
+    filters = state.get("filters") or {}
+    return {
+        "categories": collect_categories(state),
+        "year_from": filters.get("year_gte"),
+        "year_to": filters.get("year_lte"),
+    }
 
 
 async def ensure_corpus_node(state: ResearchState) -> dict:
@@ -100,7 +127,20 @@ async def ensure_corpus_node(state: ResearchState) -> dict:
     fetched = cached = 0
     corpus_error: str | None = None
 
-    if len(titles) < settings.min_corpus and not settings.ingest_enabled:
+    # F14「定向对比模式」：请求点名了具体论文（filters.arxiv_ids 由 ResearchRequest
+    # 的顶层同名字段并进，见 app/schemas/research.py 的 `_merge_arxiv_ids_into_filters`）。
+    # 这种模式下没有"再按关键词抓一批"的道理：抓回来的语料既进不了对比表
+    # （检索侧已被 arxiv_ids 限死），又要吃 arXiv 的串行限速配额、把"3 分钟"拖长。
+    # 点名的论文不在库里就如实检索不到 —— 留空，不猜、不拿相近的论文顶替。
+    target_ids = list((state.get("filters") or {}).get("arxiv_ids") or [])
+    if target_ids:
+        logger.info(
+            "ensure_corpus.directed_compare",
+            targeted=len(target_ids),
+            local=len(titles),
+            hint="只在这几篇已入库的论文里做对比，跳过关键词抓取",
+        )
+    elif len(titles) < settings.min_corpus and not settings.ingest_enabled:
         # INGEST_ENABLED=false：离线/CI 模式。不联网，只用库里已有的东西，
         # 并按同一口径如实声明覆盖度（corpus_ready 由下面的阈值判断给出）。
         logger.info("ensure_corpus.ingest_disabled", local=len(titles), need=settings.min_corpus)
@@ -114,7 +154,7 @@ async def ensure_corpus_node(state: ResearchState) -> dict:
 
             result = await ingest(
                 query,
-                categories=collect_categories(state),
+                **collect_ingest_params(state),
                 max_results=settings.arxiv_max_results,
                 settings=settings,
             )
@@ -173,4 +213,10 @@ async def ensure_corpus_node(state: ResearchState) -> dict:
     }
 
 
-__all__ = ["build_ingest_query", "collect_categories", "ensure_corpus_node", "load_corpus"]
+__all__ = [
+    "build_ingest_query",
+    "collect_categories",
+    "collect_ingest_params",
+    "ensure_corpus_node",
+    "load_corpus",
+]

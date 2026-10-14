@@ -65,6 +65,8 @@ local = [
     "FlagEmbedding>=1.3.2",
     "sentence-transformers>=3.3",
     "torch>=2.4",
+    # reranker 直接 import 它来查本地权重缓存（`_cached_on_hf`），不靠传递依赖兜着
+    "huggingface_hub>=0.23",
 ]
 # RAGAS 评测。依赖较重，独立出来，主流程不强依赖。
 eval = [

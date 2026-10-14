@@ -20,12 +20,19 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 LLMProvider = Literal["openai", "ollama", "mock"]
 EmbeddingProvider = Literal["local", "api", "mock"]
 
+# 仓库根：`<root>/app/core/config.py` 往上三层。
+# ★ 路径类默认值与 `.env` 的查找位置都锚在这里，而不是依赖进程 CWD ——
+# 写成 `./data` 的话「在哪个目录启动就在哪个目录新建一套空库」：
+# 换目录启动 = 索引和数据库"凭空消失"，而且不报错，只是结果为空。
+# 这是别人 clone 后最容易踩的坑（Docker 里 WORKDIR=/app、代码在 /app/app，同样成立）。
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 
 class Settings(BaseSettings):
     """从环境变量 / `.env` 读取的全局配置。"""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=REPO_ROOT / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
@@ -140,11 +147,15 @@ class Settings(BaseSettings):
     langchain_endpoint: str = ""
 
     # ---------------------------- 存储 -------------------------------
-    data_dir: Path = Path("./data")
-    faiss_index_dir: Path = Path("./data/faiss")
-    sqlite_dir: Path = Path("./data/sqlite")
-    checkpoint_db: Path = Path("./data/sqlite/checkpoints.db")
-    sqlite_url: str = "sqlite+aiosqlite:///./data/sqlite/paperpilot.db"
+    # 默认值全部是**绝对路径**（见 `REPO_ROOT`）：相对默认值会让"从别的目录启动"
+    # 变成"另建一套空库"，而不报错 —— 使用者只会看到索引明明建了却检索不到东西。
+    data_dir: Path = REPO_ROOT / "data"
+    faiss_index_dir: Path = REPO_ROOT / "data" / "faiss"
+    sqlite_dir: Path = REPO_ROOT / "data" / "sqlite"
+    checkpoint_db: Path = REPO_ROOT / "data" / "sqlite" / "checkpoints.db"
+    # as_posix()：Windows 下的反斜杠会出现在 URL 里，SQLAlchemy 不认，看着像路径问题、
+    # 实际是 URL 解析问题，很难查。斜杠在两个平台上都合法。
+    sqlite_url: str = f"sqlite+aiosqlite:///{(REPO_ROOT / 'data' / 'sqlite' / 'paperpilot.db').as_posix()}"
 
     # ---------------------------- 服务 -------------------------------
     api_host: str = "0.0.0.0"

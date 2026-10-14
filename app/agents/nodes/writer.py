@@ -13,6 +13,15 @@ prompt 里当然要写清楚，但**只在 prompt 里写是幼稚的**：
    `verification.unsupported`，模型删不掉也改不了；
 3. 页脚"本文由 AI 生成，引用请以原文为准"固定追加（产品定义 §7 合规要求）。
 
+## F6「剔除」的三态口径（为什么不是"只留 verified=True"）
+`Evidence.verified` 是三态：True=校验通过、False=判为无支撑、**缺失/None=没校验过**
+（give_up 降级路径与校验整体失败时 verifier 根本没写回）。
+产品定义 §5 对 F6 的验收是「无支撑的论断被标记并**从正文剔除**」，
+所以这里只剔除 `verified is False` 的条目，保留缺失/None 的 ——
+若按"只留 True"处理，降级路径下所有引用都会被当成"无支撑"，
+整份报告的正文与参考文献会被掏空，用户拿到一篇没有引用的空壳，
+比"带着一两条未校验引用"损伤大得多。宁可少剔除，不可错杀。
+
 ## 语料不足的降级
 `corpus_ready=False` 时，报告开头**显式声明检索覆盖度**。
 架构 §2.2：「不能让 Agent 在空索引上硬编答案」。
@@ -30,6 +39,36 @@ from app.agents.state import STAGE_WRITTEN, Evidence, ResearchState
 logger = structlog.get_logger(__name__)
 
 _FOOTER = "> 本文由 AI 生成，引用请以原文为准。"
+
+# F17 输出语言切换：目前只显式认识 zh / en，其余取值把语言码原样写进指令
+# （小模型对"用 fr 撰写"这类指令的遵循度不高，但这属于"默认行为不变 + 尽力而为"的范围）。
+_LANG_LABELS = {"zh": "中文", "en": "英文（English）"}
+
+
+def _output_language(state: ResearchState) -> str:
+    """本次运行的输出语言码。缺省 zh —— 与加 language 字段之前的行为完全一致。"""
+    return (state.get("language") or "zh").strip().lower() or "zh"
+
+
+def _language_rule(lang: str) -> str:
+    """渲染 writer prompt 里的 `{{LANGUAGE_RULE}}` 占位符。"""
+    if lang == "en":
+        return (
+            "综述正文一律使用 **English** 撰写；"
+            "方法名 / 数据集名 / 指标名保持英文原文。"
+        )
+    if lang == "zh":
+        return "综述正文一律使用**中文**撰写；方法名 / 数据集名 / 指标名保留英文原文。"
+    return f"综述正文一律使用 {lang} 撰写；方法名 / 数据集名 / 指标名保留其在原文中的写法。"
+
+
+def _split_by_verification(
+    citations: list[Evidence],
+) -> tuple[list[Evidence], list[Evidence]]:
+    """按三态口径把引用拆成 `(保留, 剔除)`（判据与原因见模块 docstring）。"""
+    kept = [c for c in citations if c.get("verified") is not False]
+    dropped = [c for c in citations if c.get("verified") is False]
+    return kept, dropped
 
 
 def _reference_list(citations: list[Evidence], titles: dict[str, str]) -> tuple[str, dict[str, int]]:
@@ -70,29 +109,34 @@ def _coverage_notice(state: ResearchState) -> str:
 
 
 async def write_node(state: ResearchState) -> dict:
-    """生成最终中文综述（Markdown）。"""
+    """生成最终综述（Markdown，语言由 `state["language"]` 决定，默认中文）。"""
     citations: list[Evidence] = list(state.get("citations") or [])
+    # F6 剔除：`verified is False` 的论断不进 prompt、不进参考文献（三态口径见模块 docstring）
+    kept, dropped = _split_by_verification(citations)
     retrieved = state.get("retrieved") or []
     papers = dedup_papers(retrieved)
     titles = {p["arxiv_id"]: p.get("title", "") for p in papers}
 
-    reference_block, order = _reference_list(citations, titles)
+    reference_block, order = _reference_list(kept, titles)
 
     # 把"引用 → 序号"的映射一并交给模型，避免它自己编号错位
     numbered_evidence = "\n".join(
         f"[{order[f'{c.get('paper_id')}|{c.get('chunk_id')}']}] 论断：{c.get('claim')}｜"
         f"原文：{c.get('quote', '')[:120]}（arXiv:{c.get('paper_id')}｜{c.get('source')}）"
-        for c in citations
+        for c in kept
         if f"{c.get('paper_id')}|{c.get('chunk_id')}" in order
     )
 
+    lang = _output_language(state)
+    lang_label = _LANG_LABELS.get(lang, lang)
+    system_prompt = load_prompt("writer").replace("{{LANGUAGE_RULE}}", _language_rule(lang))
     block = render_papers_block(papers, max_chunks_per_paper=1)
     messages = [
-        SystemMessage(content=load_prompt("writer")),
+        SystemMessage(content=system_prompt),
         HumanMessage(
             content=(
                 f"研究问题：{state.get('question', '')}\n\n"
-                f"请基于下列**已通过校验的证据**撰写中文综述。"
+                f"请基于下列**已通过校验的证据**撰写{lang_label}综述。"
                 f"引用序号请严格使用已给编号：\n\n{numbered_evidence}\n\n"
                 f"（以下为对应论文原文片段，仅供核对措辞，不要引入未在上面列出的结论）\n\n{block}"
             )
@@ -107,6 +151,15 @@ async def write_node(state: ResearchState) -> dict:
         body = "（综述生成失败，以下为本次检索与抽取的结构化结果）"
 
     unsupported = list((state.get("verification") or {}).get("unsupported") or [])
+    # 兜底合并：verification.unsupported 正常就来自 `verified is False` 的那批引用
+    # （见 verifier 的写回），这里只补"被剔除却没进 unsupported"的漏网条目，
+    # 按论断文本去重，保证同一条不会在 ⚠️ 一节里列两遍。
+    _listed = {(u or "").strip() for u in unsupported}
+    for c in dropped:
+        claim = (c.get("claim") or "").strip()
+        if claim and claim not in _listed:
+            unsupported.append(c.get("claim"))
+            _listed.add(claim)
     sections: list[str] = [_coverage_notice(state), body.strip()]
 
     # ⚠️ 未支撑论断一节：**由代码追加**，模型删不掉（产品定义 §4 产出物 D）

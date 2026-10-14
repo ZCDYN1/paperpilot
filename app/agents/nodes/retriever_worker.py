@@ -36,24 +36,47 @@ def _build_args(state: ResearchState, sub_question: SubQuestion) -> HybridSearch
     `HybridSearchArgs` 会把 `top_k>50`、年份倒置、越界分类这些**LLM 幻觉参数**
     挡在检索层之外（架构 §10「工具侧」）；把校验放在这里，
     错误会在第一时间以明确报错暴露，而不是变成"结果莫名其妙变少"。
+
+    分类只取**子问题自己的**；API 传下来的全局分类走 `_build_extra_filters`。
+    此前这里写的是"全局恰好 1 个分类才塞进单值 category"，多分类会被**静默整组丢弃**
+    —— F2 承诺的多分类过滤实际从未生效过。`HybridSearchArgs.category` 是单值契约
+    （LLM 工具入参，宁缺毋滥），多值过滤属于全局通道，不该挤进这个字段。
+
+    `top_k` / `rerank` 优先取 **state**（请求级，由 `_initial_state` 转发），没传才退回配置。
+    之前这两个只读 `settings`，于是 `ResearchRequest.top_k` 与 `.rerank` 是纯粹的装饰字段：
+    用户把重排开关拨到 off，链路照旧重排，而且从 SSE 事件到日志都看不出差别。
     """
     settings = get_settings()
     filters = state.get("filters") or {}
-    # 分类优先级：子问题自己的分类更具体，优先；否则退回 API 层传下来的全局过滤。
-    category = sub_question.get("category")
-    if not category:
-        cats = filters.get("categories") or []
-        category = cats[0] if len(cats) == 1 else None
-
+    rerank_flag = state.get("rerank")
     return HybridSearchArgs(
         query=sub_question.get("text") or state.get("question") or "",
         keywords=list(sub_question.get("keywords") or []),
-        top_k=settings.rerank_top_n,
+        # ⚠️ 这里给的是"最终留几篇"（`run_hybrid_search` 把它映射到 rerank_top_n），
+        # 每一路的召回量由 `RETRIEVE_TOP_K` 决定，两者不要混。
+        top_k=int(state.get("top_k") or settings.rerank_top_n),
+        # None / 缺失 = 请求没表态，按"重排开"处理，与加这个字段之前的行为一致。
+        # 全局 `RERANK_ENABLED=false` 仍然压得住：那时拿到的就是 NullReranker。
+        rerank=True if rerank_flag is None else bool(rerank_flag),
         year_gte=filters.get("year_gte"),
         year_lte=filters.get("year_lte"),
-        category=category,
+        category=sub_question.get("category"),
+        has_code=filters.get("has_code"),
         sub_question_id=sub_question.get("id"),
     )
+
+
+def _build_extra_filters(state: ResearchState) -> dict:
+    """全局过滤里 `HybridSearchArgs` 单值契约装不下的部分（多分类 / 指定论文集合）。
+
+    `build_filter` 的合并语义是"args 里已有值就不覆盖"：子问题的单分类仍然胜出
+    （更具体的约束优先，架构 §5.2），这里只补它没占住的键。
+    """
+    filters = state.get("filters") or {}
+    return {
+        "categories": list(filters.get("categories") or []) or None,
+        "arxiv_ids": list(filters.get("arxiv_ids") or []) or None,
+    }
 
 
 async def retrieve_node(state: ResearchState) -> dict:
@@ -70,7 +93,7 @@ async def retrieve_node(state: ResearchState) -> dict:
     call_id = f"ret-{sub_question.get('id', 'unknown')}-{uuid.uuid4().hex[:6]}"
 
     started = time.perf_counter()
-    hits = await run_hybrid_search(args)
+    hits = await run_hybrid_search(args, extra_filter=_build_extra_filters(state))
     duration_ms = int((time.perf_counter() - started) * 1000)
 
     logger.info(
@@ -90,6 +113,9 @@ async def retrieve_node(state: ResearchState) -> dict:
                 node="retrieve",
                 tool="hybrid_search",
                 args=args.model_dump(),
+                # 全局多分类 / F14 论文集合走的是 extra_filter，不记进事件就排查不了
+                # "过滤到底有没有生效"这类问题（事件是 SSE 调试面板的数据源）。
+                extra_filters=_build_extra_filters(state),
                 call_id=call_id,
             ),
             node_event(

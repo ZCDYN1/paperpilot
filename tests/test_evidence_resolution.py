@@ -408,11 +408,13 @@ async def test_verify_hard_check_accepts_reanchored_citation():
         "claim": "融合把两路排名合起来。",
         "verified": False,
     }
-    ok, reason, anchor = verifier_node._hard_check(citation, known, papers)  # noqa: SLF001
+    ok, reason, anchor, how = verifier_node._hard_check(citation, known, papers)  # noqa: SLF001
     assert ok is True
     assert reason == ""
     # 第三个返回值是定位结果：verify 要靠它把真实片段带下去（见 _anchor 的键名说明）
     assert anchor["resolved_chunk_id"] == 101
+    # 第四个返回值是定位路径（供 citation_rescue 事件统计）：精确命中就是 exact
+    assert how == "exact"
 
 
 async def test_verify_hard_check_still_fails_fabricated_quote():
@@ -425,7 +427,8 @@ async def test_verify_hard_check_still_fails_fabricated_quote():
         "claim": "检索其实没必要。",
         "verified": False,
     }
-    ok, reason, anchor = verifier_node._hard_check(citation, known, papers)  # noqa: SLF001
+    ok, reason, anchor, how = verifier_node._hard_check(citation, known, papers)  # noqa: SLF001
     assert ok is False
     assert reason == "引文未能在原文中逐字匹配"
     assert anchor == {}, "没定位到就不该产出任何「纠正后的定位」"
+    assert how == "exact", "定位路径与校验结论是两回事：定位到了（exact），但引文对不上"

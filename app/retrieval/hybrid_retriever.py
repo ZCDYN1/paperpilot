@@ -53,16 +53,21 @@ class ChunkRecord:
     year: int | None = None
     primary_category: str | None = None
     page: int | None = None
+    # 来源 = 入库时从 arXiv 官方元数据（comment/abstract）检测的开源仓库链接（D7）。
+    # None = 未判定：has_code=True 过滤要求实证，False 过滤把 None 视作"未见链接"纳入
+    # （见 MetadataFilter.has_code 的口径说明）。
+    has_code: bool | None = None
 
 
 @dataclass(slots=True)
 class MetadataFilter:
-    """metadata 过滤条件。限定分类 / 年份是真实且高频的需求。"""
+    """metadata 过滤条件。限定分类 / 年份 / 是否有代码是真实且高频的需求（产品 F2）。"""
 
     categories: Sequence[str] | None = None
     year_gte: int | None = None
     year_lte: int | None = None
     arxiv_ids: Sequence[str] | None = None
+    has_code: bool | None = None
 
 
 @dataclass
@@ -92,7 +97,7 @@ class SearchConfig:
     vector_weight: float = 0.5         # 仅 fusion="weighted" 时生效
     bm25_weight: float = 0.5
     use_rerank: bool = True            # 交叉编码器重排
-    use_metadata_filter: bool = True   # 分类 / 年份白名单过滤
+    use_metadata_filter: bool = True   # 分类 / 年份 / 是否有代码白名单过滤
 
 
 # 线上默认配置。之所以导出成模块级常量，是为了让调用方能显式引用
@@ -119,12 +124,15 @@ def corpus_digest(records: Sequence[ChunkRecord], titles: dict[str, str] | None 
     （每次提问都要把全部 chunk 重新 encode 一遍，本地 BGE 下以分钟计），
     但"索引非空就跳过"又会让换模型/改分块后的旧索引**静默失真**。
     指纹把两者分开 —— 内容没变就跳过，内容变了必然重建，不靠人记得手动跑脚本。
+    `has_code` 也进指纹：它不参与文本内容，但**参与 metadata 过滤** ——
+    检测结果变了而索引不重建，就会出现"文本还在、过滤条件却对着旧标签"的静默失真
+    （本项目反复出现的风险类型）。
     """
     h = hashlib.sha256()
     for r in sorted(records, key=lambda x: x.chunk_id):
         h.update(
             f"{r.chunk_id}\x1f{r.arxiv_id}\x1f{r.section}\x1f{r.source}\x1f"
-            f"{r.chunk_type}\x1f{r.text}\n".encode()
+            f"{r.chunk_type}\x1f{r.text}\x1f{r.has_code}\n".encode()
         )
     for arxiv_id in sorted(titles or {}):
         h.update(f"T\x1f{arxiv_id}\x1f{titles[arxiv_id]}\n".encode())
@@ -408,6 +416,11 @@ class HybridRetriever:
                 continue
             if filters.arxiv_ids and rec.arxiv_id not in set(filters.arxiv_ids):
                 continue
+            # has_code 用「有没有实证链接」这一个事实位判：None（未判定）不是第三种取值，
+            # 而是"没有真阳性证据" —— true 一侧要求实证，false 一侧兜住 None，
+            # 否则语料里几乎不存在显式 False，false 过滤会退化成永远为空。
+            if filters.has_code is not None and bool(rec.has_code) != filters.has_code:
+                continue
             allow.add(cid)
         return allow
 
@@ -478,6 +491,16 @@ class HybridRetriever:
             ),
             "title_ids": np.asarray(sorted(self._titles), dtype=object),
             "title_values": np.asarray([self._titles[k] for k in sorted(self._titles)], dtype=object),
+            # has_code 与 ids 同序、独立成列：不动 records 的列结构，老索引缺这一列时
+            # load_meta 能按"未知"优雅降级（同 embedding_identity 的兼容口径）。
+            # 哨兵与 year/page 一致：-1 = None。
+            "has_codes": np.asarray(
+                [
+                    -1 if self._chunks[i].has_code is None else int(self._chunks[i].has_code)
+                    for i in ids
+                ],
+                dtype="int8",
+            ),
             # ★ 索引指纹：记录"这一版向量是用什么模型算出来的"。
             #   没有这一条，用户换 embedding 服务商后无从判断该不该重建索引 ——
             #   而这恰恰是"clone 下来接自己的 API"时最常见的一步操作。
@@ -532,6 +555,12 @@ class HybridRetriever:
         self._titles = {
             str(k): str(v) for k, v in zip(data["title_ids"], data["title_values"], strict=True)
         }
+        # has_code：老索引没有这一列 → 全部保持 None（不报错），代价只是 has_code 过滤
+        # 查不到东西；corpus_digest 已把它算进指纹，旧索引下一次 ensure_corpus 必然重建。
+        if "has_codes" in data:
+            for cid, flag in zip(ids, data["has_codes"], strict=True):
+                code = int(flag)
+                self._chunks[int(cid)].has_code = None if code == -1 else bool(code)
         # 老索引没有这两个字段 → 保持 None，交由 check_index_compatibility 按"未知"处理。
         # 这里刻意不报错：否则升级代码后老用户连检索都跑不起来，代价远大于收益。
         if "embedding_identity" in data:

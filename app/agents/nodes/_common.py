@@ -1,4 +1,4 @@
-"""节点共用的小工具：LLM 调用 + token 记账 + 检索结果整形。
+r"""节点共用的小工具：LLM 调用 + token 记账 + 检索结果整形。
 
 ## 为什么要把 token 记账放在这里
 `finalize` 要产出"本次研究消耗 42,180 tokens / 约 ¥0.63"（产品定义 §4 产出物 E），
@@ -211,6 +211,28 @@ def dedup_papers(retrieved: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(buckets.values(), key=lambda p: (-p["score"], p["arxiv_id"]))
 
 
+def prioritize_unread(
+    papers: list[dict[str, Any]], read_ids: set[str] | None
+) -> list[dict[str, Any]]:
+    """把长期记忆里"已精读过"的论文排到队尾（产品定义 F10「下次不重复推荐」）。
+
+    **稳定分区**：组内保持 `dedup_papers` 给出的重排序不变，只是未读整体前移。
+    不重排是因为重排分是唯一有数据支撑的顺序（架构 §5.3 的消融表），
+    在这里引入任何新的打分口径都会让"为什么这篇排第 6"变得无法解释。
+
+    **不剔除**：已读论文只是让出候选位，未读不足 `read_top_k`（精读篇数）时仍会补位进来。
+    "读过"不等于"与新问题无关"，把它彻底踢出去等于主动丢掉合法证据。
+    """
+    if not read_ids:
+        return list(papers)
+    unread: list[dict[str, Any]] = []
+    already: list[dict[str, Any]] = []
+    for paper in papers:
+        target = already if str(paper.get("arxiv_id")) in read_ids else unread
+        target.append(paper)
+    return unread + already
+
+
 def chunk_index(retrieved: list[dict[str, Any]]) -> dict[tuple[str, int], dict[str, Any]]:
     """建 `(arxiv_id, chunk_id) → chunk` 索引。
 
@@ -235,6 +257,7 @@ __all__ = [
     "merge_usage",
     "node_event",
     "normalize_text",
+    "prioritize_unread",
     "structured_invoke",
     "text_invoke",
     "usage_of",

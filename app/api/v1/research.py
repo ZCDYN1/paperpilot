@@ -2,10 +2,12 @@
 
 ## 这一层刻意做得很薄
 图怎么跑、事件怎么发，都已经封装在 `graph.py` 与 `SSEEmitter.stream()` 里。
-API 层只负责三件事，多一件都不做：
+API 层只负责四件事，多一件都不做：
 1. **协议转换**：把 SSE 事件流包成 `text/event-stream` 响应；
 2. **生命周期**：请求期间持有 checkpointer，断开时正确收尾；
-3. **落库**：把 run 的元信息写进 `research_runs`（用于列表页与状态查询）。
+3. **落库**：把 run 的元信息写进 `research_runs`（用于列表页与状态查询）；
+4. **指标埋点**：中断点 A 上"用户到底改没改拆解"写进 `research_runs.langgraph_state`
+   （产品定义 §8 的「子问题拆解可用率」只有这一处能观测到 —— 图本身不知道用户改了什么）。
 
 ## 两个必须做对的地方
 - **`X-Accel-Buffering: no`**：少了它，本地测试正常，一到 Nginx 后面就退化成
@@ -22,8 +24,17 @@ API 层只负责三件事，多一件都不做：
   空/超长/控制字符给 **422**（与 FastAPI 自己的请求体校验同口径）；
 - 校验**通过后才继续**，且后续流程一律使用清洗过的文本。
 
-不改请求形状：`ResearchRequest` 的字段与类型完全不动，只是在 handler 入口加了一道判定，
+不改请求形状：`ResearchRequest` 的既有字段与类型完全不动（F9 只**加了一个可选字段**
+`session_id`，不传即维持原行为），只是在 handler 入口加了一道判定，
 所以老客户端的合法请求照旧能跑（`tests/test_api_security.py` 把这条钉住）。
+
+## 「会话」与「checkpoint 的 thread」不是一回事（F9 最容易搞混的地方）
+- `session_id`：**产品概念**，把多次提问串成一段对话（短期记忆的读取键）。
+  客户端可传（追问），不传则服务端用 `run_id` 兜底（新会话）。
+- `thread_id`：**LangGraph 的断点续跑键**，永远等于 `run_id`。
+  共用 thread_id 的后果不是"报错"，而是新提问接着上一轮已经跑完的图状态走 ——
+  拆解被上一轮的证据污染，而且全程无异常。测试把这条钉在
+  `tests/test_session_followup.py`。
 """
 
 from __future__ import annotations
@@ -33,7 +44,7 @@ import uuid
 
 import structlog
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
@@ -42,6 +53,7 @@ from app.api.guards import guard_run_id, guard_sub_questions, guard_text
 from app.core.resilience import CircuitOpenError
 from app.db.models import Citation, ResearchRun, ResearchSession
 from app.db.session import session_scope
+from app.export import RunNotFoundError, render_run_markdown
 from app.observability.events import SSEEmitter
 from app.schemas.research import ResearchRequest
 
@@ -83,12 +95,19 @@ def _initial_state(req: ResearchRequest, run_id: str, session_id: str, question:
     ⚠️ `question` 是**过了输入闸门、清洗过**的那一份（见 `app.api.guards.guard_text`）：
     控制字符已去掉、注入判定已完成。这里刻意不接受 `req.question` 原值 ——
     否则"判的是清洗后的文本、用的却是原始文本"这个坑就又回来了。
+
+    `top_k` / `rerank` / `language` 是**请求级**开关，必须在这里进 state：
+    节点若各自去读 `get_settings()`（进程级 lru_cache 单例），这两个开关就只是
+    请求体上的装饰 —— 用户拨了重排开关、行为一点不变，而且从 SSE 与日志上都看不出来。
     """
     return {
         "run_id": run_id,
         "session_id": session_id,
         "question": question,
         "filters": req.filters.model_dump() if req.filters else {},
+        "top_k": req.top_k,
+        "rerank": req.rerank,
+        "language": req.language,
         "sub_questions": [],
         "retrieved": [],
         "readings": [],
@@ -110,6 +129,11 @@ async def _register_run(run_id: str, session_id: str, question: str) -> None:
                 ResearchRun(
                     id=run_id,
                     session_id=session_id,
+                    # ★ thread_id 必须是 run 级，**不能**跟着 session_id 走：
+                    # LangGraph 的 checkpoint 以 thread_id 为键，一个会话里共用同一个 thread
+                    # 会让第二次提问"从中断点续跑"上一轮已经跑完的图状态（而不是从 START 起跑），
+                    # 表现为新问题的拆解被上一轮的 readings/citations 污染。
+                    # 会话是靠 `session_id` 关联多个 run 的，与 checkpoint 的键无关。
                     thread_id=run_id,
                     question=question,
                     status="running",
@@ -124,6 +148,102 @@ async def _update_run_status(run_id: str, status: str) -> None:
             run.status = status
 
 
+# --------------------------------------------------------------------------- 指标埋点（产品定义 §8）
+# 写进 `research_runs.langgraph_state`（既有的 JSON 列），**不动任何表结构**：
+#
+#   langgraph_state["plan_edited"]      : true | false | null
+#       false = 用户在中断点 A **没有改拆解**就直接继续（"可用率"的分子）
+#       true  = 用户改了
+#       null  = 想判但判不了（读不到图产出的基线，例如 checkpoint 已丢）
+#   langgraph_state["plan_edit_detail"] : {"original_count", "final_count", "changes": [...]}
+#       changes 取值："count" | "text" | "keywords" | "category" | "no_baseline"
+#       只记**改了哪一类**，不存用户原文（那是用户可控文本，没必要在库里再存一份副本）
+#
+# 消费方的口径应当是：
+#   可用率 = #(plan_edited is false) / #(plan_edited is not null)，分母只算"真的 resume 过"的 run。
+PLAN_EDIT_FLAG = "plan_edited"
+PLAN_EDIT_DETAIL = "plan_edit_detail"
+
+
+def plan_edit_diff(original: list[dict], submitted: list[dict]) -> dict:
+    """比较「图产出的拆解」与「用户 resume 时提交的拆解」，产出 §8 可用率要的那一位。
+
+    三个判定细节是刻意的：
+    - `submitted` 为空 == 接口文档写明的"沿用原拆解直接继续" → 判 **未修改**（不是"无法判断"）；
+    - 不比较 `id`：面板回填时 id 可能被重新生成或换序，拿它判"改过"会把没改的算成改的；
+    - `keywords` 按**集合**比较：顺序对检索没有语义（BM25 只看成关键词组）。
+    """
+    original_count = len(original)
+    final_count = len(submitted)
+
+    if not submitted:
+        return {"edited": False, "changes": [], "original_count": original_count, "final_count": 0}
+    if not original:
+        # 基线读不到（checkpoint 丢失 / plan 没产出）：不能把"无法判断"记成"用户改了"，
+        # 那会直接压低可用率，而指标失真的方向恰好是最难发现的那种。
+        return {"edited": None, "changes": ["no_baseline"], "original_count": 0, "final_count": final_count}
+
+    changes: list[str] = []
+    if final_count != original_count:
+        changes.append("count")
+    for idx, new in enumerate(submitted):
+        old = original[idx] if idx < original_count else {}
+        pairs = (
+            ("text", (new.get("text") or "").strip(), (old.get("text") or "").strip()),
+            (
+                "keywords",
+                sorted(str(k) for k in (new.get("keywords") or [])),
+                sorted(str(k) for k in (old.get("keywords") or [])),
+            ),
+            ("category", new.get("category") or None, old.get("category") or None),
+        )
+        for kind, left, right in pairs:
+            if left != right and kind not in changes:
+                changes.append(kind)
+
+    return {"edited": bool(changes), "changes": changes, "original_count": original_count, "final_count": final_count}
+
+
+async def _graph_sub_questions(graph: object, config: dict) -> list[dict]:
+    """取图中断点 A 留下的拆解（判定"用户改没改"的基线）；读不到就返回空列表。"""
+    try:
+        snapshot = await graph.aget_state(config)  # type: ignore[attr-defined]
+        values = dict(getattr(snapshot, "values", None) or {})
+        return list(values.get("sub_questions") or [])
+    except Exception as exc:  # noqa: BLE001 - 取不到基线只让指标变成 null，不影响这次研究
+        logger.warning("research.plan_baseline_unavailable", error=str(exc)[:200])
+        return []
+
+
+async def _record_plan_edit(run_id: str, diff: dict) -> None:
+    """把 `plan_edited` 合并进 `research_runs.langgraph_state`。
+
+    ⚠️ 这个函数**会被调用两次**（resume 入口一次、流结束后一次）：
+    `finalize` 节点落库时用一份新的摘要整体覆盖了 `langgraph_state`
+    （见 `app/agents/nodes/finalize._persist`，那个文件不属于本层）。
+    只在入口写一次的后果是"信号跑完就没了"，而指标列恰恰只在跑完之后才被消费。
+    入口那一次的价值是：进程中途死掉 / 客户端断开时，改没改拆解这个事实已经留下来了。
+
+    本身绝不抛异常：埋点失败不能毁掉一次已经成功的 resume。
+    """
+    try:
+        async with session_scope() as db:
+            run = await db.get(ResearchRun, run_id)
+            if run is None:
+                return
+            # JSON 列必须**整体赋新值**：原地改 `run.langgraph_state[...]` SQLAlchemy 看不到差异
+            state = dict(run.langgraph_state or {})
+            state[PLAN_EDIT_FLAG] = diff["edited"]
+            state[PLAN_EDIT_DETAIL] = {
+                "original_count": diff["original_count"],
+                "final_count": diff["final_count"],
+                "changes": list(diff["changes"]),
+            }
+            run.langgraph_state = state
+    except Exception as exc:  # noqa: BLE001 - 指标是辅助信息，读不到就继续
+        logger.warning("research.plan_edit_persist_failed", run_id=run_id, error=str(exc)[:200])
+
+
 # --------------------------------------------------------------------------- 主接口
 @router.post("/stream", summary="SSE 流式研究（核心接口）")
 async def research_stream(req: ResearchRequest) -> StreamingResponse:
@@ -133,7 +253,13 @@ async def research_stream(req: ResearchRequest) -> StreamingResponse:
     question = guard_text(req.question, field="question")
 
     run_id = uuid.uuid4().hex[:16]
-    session_id = run_id  # 一次提问即一个会话；后续「会话内追问」会复用同一个 session_id
+    # ★ F9「会话内追问」的接入口：客户端传了 session_id 就**加入那个会话**，
+    # 本次提问因此能读到同一会话此前几轮的问答（短期记忆 `messages` 表，见
+    # `app/memory/short_term.py` 与 `planner` 的注入点）。
+    # 不传就保持原行为：`session_id = run_id`，一次提问即一个会话。
+    # ⚠️ 只有 session_id 会跟着会话走，`thread_id` 始终是 run 级（见 `_register_run` 的注释），
+    # 长期记忆也始终是**用户全局**、不按 session_id 过滤（见 `app/memory/long_term.py` 的★小节）。
+    session_id = req.session_id or run_id
     emitter = SSEEmitter(run_id)
 
     async def event_gen():
@@ -186,6 +312,7 @@ class ResumeRequest(BaseModel):
 
     `sub_questions` 非空表示用户**编辑过**子问题（中断点 A 的核心交互）——
     会先写回 state 再续跑，否则用户改的东西等于没改。
+    留空则是"沿用原拆解直接继续"，这条也会被 §8 的可用率埋点记成 `plan_edited=false`。
     """
 
     sub_questions: list[dict] | None = Field(
@@ -203,9 +330,21 @@ async def research_resume(run_id: str, body: ResumeRequest | None = None) -> Str
     emitter = SSEEmitter(run_id)
 
     async def event_gen():
+        plan_diff: dict | None = None
         try:
             async with open_graph() as graph:
                 config = thread_config(run_id, emitter=emitter)
+                # ★ 指标埋点：必须在 `aupdate_state` **之前**取基线 ——
+                # 一旦把用户提交的拆解写回 state，"图原本产出的是什么"就再也取不到了，
+                # 于是每条 resume 看起来都"没改"，可用率恒等于 100%。
+                plan_diff = plan_edit_diff(await _graph_sub_questions(graph, config), sub_questions)
+                await _record_plan_edit(run_id, plan_diff)
+                logger.info(
+                    "research.plan_edit",
+                    run_id=run_id,
+                    edited=plan_diff["edited"],
+                    changes=plan_diff["changes"],
+                )
                 if sub_questions:
                     # 先落回 state，再续跑 —— 顺序反了用户编辑就白改了
                     await graph.aupdate_state(config, {"sub_questions": sub_questions})
@@ -234,6 +373,10 @@ async def research_resume(run_id: str, body: ResumeRequest | None = None) -> Str
             yield emitter.done(status="error").to_sse()
         finally:
             await emitter.flush_token_usage()
+            # 补写第二次：`finalize` 在流里跑，它落库时会用摘要**整体覆盖** langgraph_state，
+            # 入口那一次写下的 plan_edited 到这里已经没了（原因见 `_record_plan_edit`）。
+            if plan_diff is not None:
+                await _record_plan_edit(run_id, plan_diff)
 
     return StreamingResponse(
         event_gen(), media_type="text/event-stream", headers=sse_headers()
@@ -258,6 +401,10 @@ async def get_run(run_id: str) -> dict:
             "session_id": run.session_id,
             "question": run.question,
             "status": run.status,
+            # §8「子问题拆解可用率」的埋点（true/false/null，形状见 `PLAN_EDIT_FLAG` 注释）。
+            # 挂在 meta 上而不是 checkpoint 里：它记录的是"用户对这个 run 做了什么"，
+            # 属于 run 的元信息，权威来源就是 `research_runs.langgraph_state`。
+            "plan_edited": (run.langgraph_state or {}).get(PLAN_EDIT_FLAG),
         }
 
     values: dict = {}
@@ -315,7 +462,35 @@ async def get_citations(run_id: str) -> dict:
                 "source": r.source,
                 "verified": r.verified,
                 "note": r.note,
+                # 定位路径的可观测面：exact | quote | swapped_chunk（read 侧），
+                # verify_reanchored=verify 硬校验时是否又重锚过一次。
+                # 迁移前的历史行是 None —— 与"记录了且为 exact/False"刻意区分。
+                "resolution_how": r.resolution_how,
+                "verify_reanchored": r.verify_reanchored,
             }
             for r in rows
         ],
     }
+
+
+@router.get("/{run_id}/export.md", summary="导出 Markdown 报告（产品定义 F8）")
+async def export_markdown(run_id: str) -> PlainTextResponse:
+    """把一次研究导出成可直接进开题报告的 .md。
+
+    渲染逻辑全在 `app/export/markdown.py`（只认数据库，不碰 checkpointer），
+    这一层只做协议映射 —— 与上面几个查询接口保持同一个口径。
+    """
+    guard_run_id(run_id)
+    try:
+        text = await render_run_markdown(run_id)
+    except RunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"run {run_id} 不存在") from exc
+
+    # `attachment` 而不是 `inline`：这个接口的用途是"下载一份能归档的文件"，
+    # 直接在浏览器里渲染成网页会把 Markdown 的相对链接与表格弄没，
+    # 而文件名带上 run_id，用户存下来之后还能对回那次研究。
+    return PlainTextResponse(
+        text,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="paperpilot-{run_id}.md"'},
+    )

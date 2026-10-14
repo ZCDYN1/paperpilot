@@ -11,6 +11,8 @@
   不存全量 state —— 全量里含 retrieved/readings 全文，整包塞进 SQLite 会让库迅速膨胀。
   完整状态由 LangGraph 的 checkpointer 负责（架构 §6 的注释）。
 - `citations` 独立成表：让"引用可溯源"变成可查询、可校验的事实。
+- `comparison_rows` 独立成表（每行一篇论文）：让"对比表字段完整率"变成可统计的事实，
+  也让旧 run 的表格能取回来。留空语义原样入库，不做任何填充。
 - `token_usage` **按节点各落一行**（`node_name="plan"/"read"/...`）外加一行 `all` 总量：
   架构 §12 要的是"成本瓶颈在哪个节点"，只落一条总量答不了这个问题。
 
@@ -46,21 +48,33 @@ def _estimate_cost(usage: dict[str, int]) -> float:
 
 
 async def _persist(state: ResearchState, usage: dict[str, int], by_node: dict | None = None) -> None:
-    """把 run / citations / token_usage 写库（幂等 upsert）。
+    """把 run / citations / comparison_rows / token_usage 写库（幂等 upsert）。
 
     `by_node` 是 token_meter 汇总出的分节点用量：除了原有的 `all` 总量行，
     每个节点再单独落一行 —— 这样"哪个节点最烧钱"是一条 SQL 就能查出来的事实，
     而不是埋在 JSON 里靠肉眼翻。
-    """
-    from sqlalchemy import select
 
-    from app.db.models import Citation, PaperChunk, ResearchRun, ResearchSession, TokenUsage
+    对比表逐行落 `comparison_rows`：产品定义 §8 的「字段完整率」此前**没有可测数据**
+    （行只活在 graph state 与 SSE 帧里），旧 run 的表格也取不回。落库口径照抄
+    `ComparisonRow` 的留空语义 —— 空串/None 原样存"没找到依据"，不做任何兜底填充。
+    """
+    from sqlalchemy import delete, select
+
+    from app.db.models import (
+        Citation,
+        ComparisonRecord,
+        PaperChunk,
+        ResearchRun,
+        ResearchSession,
+        TokenUsage,
+    )
     from app.db.session import init_db, session_scope
 
     await init_db()
     run_id = state.get("run_id") or state.get("session_id") or "run-unknown"
     session_id = state.get("session_id") or run_id
     citations = list(state.get("citations") or [])
+    comparison = list(state.get("comparison") or [])
     by_node = by_node or {}
 
     async with session_scope() as session:
@@ -77,13 +91,37 @@ async def _persist(state: ResearchState, usage: dict[str, int], by_node: dict | 
             "token_usage": usage,
             "token_by_node": by_node,
             "corpus_ready": state.get("corpus_ready"),
+            "comparison_rows": len(comparison),
         }
+        # 表级信息（生成时间 / 缺失说明）不进 comparison_rows —— 那张表的契约是
+        # "每行一篇论文"，而这两项是**整表**的属性。`comparison` state 只装得下行，
+        # 它们被 compare 节点塞进了 thought 事件（见 comparator.compare_node 的同名注释），
+        # 这里从事件里取回来放进轻量摘要，否则"表何时生成、哪些列普遍缺失"会随 thread 一起丢。
+        for event in reversed(list(state.get("events") or [])):
+            if "comparison_notes" in event or "comparison_generated_at" in event:
+                summary["comparison_generated_at"] = event.get("comparison_generated_at")
+                summary["comparison_notes"] = event.get("comparison_notes")
+                break
+        # ⚠️ 接住 API 层在中断点写下的决策位：本函数用**新摘要整体覆盖** langgraph_state
+        # （JSON 列必须赋新值才触发 UPDATE）。生产方在 resume 入口与流结束后各写一次
+        # （`app/api/v1/research.py::_record_plan_edit`），中间恰好隔着本次覆盖 ——
+        # 不接住的话"进程在两段之间死掉"就会把信号整个吞掉，而 §8 可用率只看跑完的 run。
+        # 流结束后生产方会用权威值再覆盖一次，这里带旧值不会让它变陈旧。
+        if isinstance(run, ResearchRun) and isinstance(run.langgraph_state, dict):
+            for _k in ("plan_edited", "plan_edit_detail"):
+                if _k in run.langgraph_state:
+                    summary[_k] = run.langgraph_state[_k]
         if run is None:
             session.add(
                 ResearchRun(
                     id=run_id,
                     session_id=session_id,
-                    thread_id=state.get("session_id") or run_id,
+                    # ★ thread_id 必须是 run 级，和 `research.py::_register_run` 同一条不变量。
+                    # 这里曾经写成 `session_id or run_id`：走"API 层没登记、由 finalize 补插行"
+                    # 的路径时，同一会话的多个 run 会共用一个 checkpoint thread，
+                    # 于是第二次提问不是从 START 起跑，而是接着上一轮已跑完的 state 走 ——
+                    # 表现为 readings/citations 被上一轮污染（不报错，只是结果不对）。
+                    thread_id=run_id,
                     question=state.get("question") or "",
                     status="done",
                     langgraph_state=summary,  # 只存轻量摘要（架构 §6）
@@ -117,6 +155,40 @@ async def _persist(state: ResearchState, usage: dict[str, int], by_node: dict | 
                     # 校验失败原因（硬校验/软校验的具体说明）落进 note，供人工抽检口径核对；
                     # 通过的引用没有失败原因，保持 None 而不是空串，便于区分"没写"与"写了但为空"。
                     note=(cit.get("verify_note") or None) if not cit.get("verified") else None,
+                    # 定位路径与"verify 是否重锚过"落库：此前这两个事实只在后端日志里，
+                    # `/citations` 与抽检工具都看不到"这条引用是靠哪条兜底路径救回来的"。
+                    # resolved_chunk_id 只有 verify 真的纠正过定位时才存在（见 verifier._anchor）。
+                    resolution_how=cit.get("resolution_how"),
+                    verify_reanchored=bool(cit.get("resolved_chunk_id") is not None),
+                )
+            )
+
+        # ---- 对比表落库（产品定义 §8「字段完整率」的数据源）----
+        # 先删本 run 旧行再插新行：run 恢复重跑时 finalize 可能执行第二次，
+        # 表里留"最新一次的表"才对得上报告；delete+insert 比逐行 upsert 简单且幂等。
+        # 空串 / None 一律原样存 —— 那是「没找到依据」的产品承诺，不是缺失数据。
+        await session.execute(delete(ComparisonRecord).where(ComparisonRecord.run_id == run_id))
+        for idx, row in enumerate(comparison):
+            session.add(
+                ComparisonRecord(
+                    run_id=run_id,
+                    row_index=idx,
+                    arxiv_id=str(row.get("arxiv_id") or ""),
+                    title=str(row.get("title") or ""),
+                    method_name=str(row.get("method_name") or ""),
+                    core_idea=str(row.get("core_idea") or ""),
+                    datasets=str(row.get("datasets") or ""),
+                    improvement=str(row.get("improvement") or ""),
+                    cost=str(row.get("cost") or ""),
+                    limitation=str(row.get("limitation") or ""),
+                    code_url=str(row.get("code_url") or ""),
+                    venue=str(row.get("venue") or ""),
+                    cited_by_count=(
+                        int(row["cited_by_count"])
+                        if isinstance(row.get("cited_by_count"), int)
+                        else None
+                    ),
+                    cited_at=(str(row["cited_at"]) if row.get("cited_at") else None),
                 )
             )
 
@@ -154,13 +226,14 @@ def _read_paper_ids(state: ResearchState) -> list[str]:
 
     为什么不用 `retrieved`（检索到的全部）：产品的语义是"已读论文清单，避免下次重复精读"，
     而检索结果里大部分论文只是被召回、并没进 Reader。用 `readings` 才名副其实。
-    `readings` 为空（例如语料不足降级）时退回 `retrieved`，让"至少读过些什么"仍有记录 ——
-    有记录比精确更重要，何况降级场景下 retrieved 就是全部可得信息。
+
+    ⚠️ `readings` 为空时**如实返回空**，不退回 `retrieved`。
+    退回等于把"这次一篇都没读成"（抽取失败、语料不足降级）记成"这 24 篇全读过了"。
+    在已读清单还没被任何地方消费时这只是不精确；但 `read` 节点现在会用它排除候选
+    （产品定义 F10），一次降级运行就能把下一次的候选压光，形成持续拿不到候选的负反馈。
+    降级场景下"读过什么"这个信息本来就不存在，不编造比编造有用。
     """
-    read_ids = [r.get("paper_id") for r in (state.get("readings") or []) if r.get("paper_id")]
-    if read_ids:
-        return sorted(set(read_ids))
-    return sorted({p.get("arxiv_id") for p in (state.get("retrieved") or []) if p.get("arxiv_id")})
+    return sorted({r.get("paper_id") for r in (state.get("readings") or []) if r.get("paper_id")})
 
 
 async def _write_memory(state: ResearchState) -> None:

@@ -101,6 +101,13 @@ class ResearchState(TypedDict, total=False):
     run_id: str
     question: str
     filters: dict[str, Any]        # metadata 过滤（分类/年份），从 API 透传下来
+    # ★ 下面三个是**请求级**开关。它们必须作为 state 通道存在，而不是让节点各自去读
+    #   `settings`：`Settings` 是进程级的（`get_settings()` 带 lru_cache），
+    #   一次提问的 top_k/rerank/语言属于这次请求，写进 state 才能被 checkpoint 回放，
+    #   也才不会让并发的两个 run 互相串配置。
+    top_k: int                    # 每个子问题重排后保留几篇；None 时节点退回 settings.RERANK_TOP_N
+    rerank: bool                  # 是否走交叉编码器重排（延迟敏感可关；消融表就是靠它量化权衡）
+    language: str                 # 成稿输出语言（"zh" / "en"，产品定义 F17）
 
     # ---- Planner ----
     sub_questions: list[SubQuestion]
@@ -109,6 +116,10 @@ class ResearchState(TypedDict, total=False):
     # ★ Send 扇出时注入给「单个分支」的私有字段。
     #   `route_to_workers` 通过 Send 把它塞进某个 retrieve 任务的入参；
     #   Send 只作用于单分支，不会污染全局 state。
+    # ⚠️ 反过来也成立，而且更容易忘：**Send 的 payload 就是那个分支的全部 state**，
+    #   全局通道不会自动带进来。所以分支要读的配置（filters / top_k / rerank / language）
+    #   必须由 `graph._worker_payload` 显式放进去 —— 漏掉的表现不是报错，而是
+    #   "用户设的过滤条件在检索那一步凭空消失"。
     sub_question: SubQuestion
     # revise 扇出用的补充子问题（与 sub_questions 分开，避免污染原计划）
     revision_sub_questions: list[SubQuestion]

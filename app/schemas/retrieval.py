@@ -77,11 +77,36 @@ class HybridSearchArgs(BaseModel):
         default_factory=list,
         description="**英文**术语列表，供 BM25 使用（中文关键词打英文索引会失效，见架构 §4.1 注①）",
     )
-    top_k: int = Field(default=8, ge=1, le=50, description="返回的论文数上限")
+    top_k: int = Field(
+        default=8,
+        ge=1,
+        le=50,
+        # ⚠️ 口径：这个字段是**最终返回的论文数**，不是每一路（FAISS / BM25）各召回多少条。
+        # 每一路的召回量由 `RETRIEVE_TOP_K` 决定。曾经这里被当成 `search(top_k=)` 直接透传，
+        # 于是线上每路只取 8 条就去融合，而消融表量的是 50 条 —— 两张口径不一致的表
+        # 一起放在 README 里，读者以为比的是同一条链路（见 `run_hybrid_search` 的映射）。
+        description="返回的论文数上限（最终保留几篇），非每路召回量；每路召回量由 RETRIEVE_TOP_K 决定",
+    )
+    rerank: bool = Field(
+        default=True,
+        description=(
+            "是否启用交叉编码器重排。false 时这一路不做重排（延迟换精度的权衡，"
+            "与 `RERANK_ENABLED` 是 AND 关系：全局关掉时请求说 true 也不会重排）"
+        ),
+    )
     year_gte: int | None = Field(default=None, ge=_MIN_YEAR, le=_MAX_YEAR, description="起始年份")
     year_lte: int | None = Field(default=None, ge=_MIN_YEAR, le=_MAX_YEAR, description="结束年份")
     category: str | None = Field(
         default=None, description="arXiv 分类，如 cs.CL；必须在白名单内"
+    )
+    has_code: bool | None = Field(
+        default=None,
+        description=(
+            "是否有开源仓库（F2 第三类过滤）。true=只召回 arXiv 元数据里**确认检测到**仓库链接"
+            "（github/gitlab/huggingface/bitbucket）的论文；false=只召回未确认有链接的论文"
+            "（识别不到就留 None 的论文归入 false 一侧 —— 真阳性必须有证据，"
+            "「没见过链接」本身是事实而非编造）；None（默认）=不按此过滤"
+        ),
     )
     sub_question_id: str | None = Field(
         default=None, description="所属子问题 id，便于把检索结果回填到 SSE retrieval 事件"
@@ -115,4 +140,5 @@ class HybridSearchArgs(BaseModel):
             "categories": [self.category] if self.category else None,
             "year_gte": self.year_gte,
             "year_lte": self.year_lte,
+            "has_code": self.has_code,
         }

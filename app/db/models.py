@@ -1,10 +1,18 @@
-"""ORM 模型：12 张表。
+"""ORM 模型：13 张表。
 
 几个刻意的设计：
 
 - **`citations` 单独建表**：让「引用可溯源」变成*可查询、可校验的事实*，
   而不只是 prompt 里的一句约束。Verifier 的校验结果直接写回 `verified` 字段，
   于是"引用准确率"这个指标可以零成本自动统计。
+- **`comparison_rows` 单独建表**：对比表此前只活在 graph state 与 SSE 帧里，
+  导致「对比表字段完整率 ≥ 80%」（产品定义 §8）没有可测的数据，
+  旧 run 的表格也取不回来（`GET /research/{run_id}` 读的是 checkpointer，thread 一清就没了）。
+  **每行一篇论文、与 `ComparisonRow` 字段一一对应**（而不是 paper×field 长表）：
+  产品契约的字段集是固定的 12 列（`extra="forbid"`），宽表取回整表无需 pivot，
+  完整率就是逐列一次 COUNT —— 长表的两项好处（字段可增删、按字段自由聚合）
+  在这里都用不上，反而把"schema 与 pydantic 模型必须同步"这条约束藏起来。
+  空值语义照抄产品承诺：**空串 / NULL = 「没找到依据」的刻意留空，不是待补的数据**。
 - **`paper_chunks.source`**：值只有 `html` / `abstract` 两种。arXiv 官方 HTML 取不到的旧论文
   只能给到摘要级证据，引用卡片上必须能一眼看出证据强度，不能让用户误以为是正文原文。
 - **`research_runs.langgraph_state` 只存轻量摘要**：全量 state 里含 retrieved / readings 全文，
@@ -190,6 +198,49 @@ class LongTermMemory(Base):
 # =============================================================================
 # 证据与观测
 # =============================================================================
+class ComparisonRecord(Base):
+    """结构化对比表的一行 = **一篇论文**（与 `app/agents/schemas.ComparisonRow` 同形）。
+
+    ⚠️ 空值的产品语义（`ComparisonRow` 三条不可协商的规则）：
+    **空串 / None 表示「原文里没找到依据」的刻意留空，不是待补全的缺失数据**。
+    因此这里的统计口径只数"填上了多少"，绝不给空值兜底默认 ——
+    任何"把空字段填个占位值再算完整率"的做法都在推翻这张表的可信度承诺。
+
+    `run_id` 不建外键（与 `citations` 同口径）：收尾写入发生在 run 登记之后、
+    且 run 行可能被其它路径改写，FK 只会把"落库失败"的爆炸半径扩大，没有额外约束收益。
+    也不建 `(run_id, arxiv_id)` 唯一约束：arxiv_id 理论可为空串，两行空串会撞约束，
+    而约束冲突抛错的代价是**整张表丢失**（finalize 的每步副作用都单独 try/except）。
+    幂等性由写入方保证：`finalize._persist` 先删本 run 旧行再插新行。
+    """
+
+    __tablename__ = "comparison_rows"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    # 表内行序（compare 节点按精读顺序产出）。恢复旧表需要稳定顺序；
+    # 用自增 id 排序也行，但 id 会随"删旧插新"的幂等重写重新分配，row_index 不会。
+    row_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    arxiv_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False, default="")
+    title: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # ---- 逐字段回原文校验的自由文本列（找不到依据即留空）----
+    method_name: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    core_idea: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    datasets: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    improvement: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    cost: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    limitation: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # ---- 代码权威覆盖的列（模型说了不算，见 comparator._row_from）----
+    code_url: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    venue: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # 被引数与截至日期**成对出现**： comparator 在没有 cited_at 时把数字也清空
+    # （孤零零的 "0" 会被误读成"没人引用"），所以这两列可空，None = 留空。
+    cited_by_count: Mapped[int | None] = mapped_column(Integer)
+    cited_at: Mapped[str | None] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class Citation(Base):
     """引用证据链 —— 「引用可溯源」这一核心承诺的落地载体。"""
 
@@ -207,6 +258,12 @@ class Citation(Base):
     source: Mapped[str | None] = mapped_column(String(16))                 # html|abstract
     verified: Mapped[bool | None] = mapped_column(Boolean, index=True)     # None=未校验
     note: Mapped[str | None] = mapped_column(Text)                         # 校验说明
+    # 引用定位的可观测面（此前只存在于后端日志 read.done 的 reanchored/recovered_by 里）：
+    # resolution_how = read 侧走通的路径（exact | quote | swapped_chunk），
+    # verify_reanchored = verify 硬校验时是否又重锚过一次。
+    # 两列都可空：迁移前的历史行保持 NULL（= 当时没记录），与"记录了且为 exact/False"区分开。
+    resolution_how: Mapped[str | None] = mapped_column(String(16))
+    verify_reanchored: Mapped[bool | None] = mapped_column(Boolean)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

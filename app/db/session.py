@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -85,10 +85,38 @@ async def session_scope() -> AsyncIterator[AsyncSession]:
 
 
 async def init_db() -> None:
-    """建表（幂等）。生产环境应改用 Alembic 迁移，这里保证开箱即用。"""
+    """建表（幂等）+ 最小列迁移。生产环境应改用 Alembic，这里保证开箱即用。
+
+    ⚠️ `create_all` **不会给已存在的表加列**（它只建缺失的表）：dev 库里
+    `data/sqlite/paperpilot.db` 已经带着真实数据，所以每次加列都必须配一段
+    "PRAGMA 查缺 → ALTER TABLE 补缺"的幂等迁移（见 `_ensure_citation_columns`）。
+    新列一律可空，历史行保持 NULL —— 不丢数据、可重复执行、不引入迁移框架。
+    """
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_ensure_citation_columns)
+
+
+# citations 表的最小列迁移清单：`列名 → 与 ORM 模型一致的 DDL 类型`。
+# 与 `app/db/models.py` 的 Citation 手工保持同步（这正是"没有 Alembic"的代价，
+# 刻意只收留这一处，避免它长成第二套 schema 定义）。
+_CITATION_ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("resolution_how", "VARCHAR(16)"),
+    ("verify_reanchored", "BOOLEAN"),
+)
+
+
+def _ensure_citation_columns(sync_conn) -> None:  # noqa: ANN001 - run_sync 传入的同步 Connection
+    """给已存在的 `citations` 表补齐缺失的列（幂等：跑多少遍结果都一样）。
+
+    只允许 `ADD COLUMN`（可空、无默认值回填），绝不 DROP/重建 ——
+    SQLite 的 ALTER 能力有限，而这张表里是真实运行数据。
+    """
+    existing = {row[1] for row in sync_conn.execute(text("PRAGMA table_info(citations)"))}
+    for name, ddl_type in _CITATION_ADDED_COLUMNS:
+        if name not in existing:
+            sync_conn.execute(text(f"ALTER TABLE citations ADD COLUMN {name} {ddl_type}"))
 
 
 async def dispose_engine() -> None:

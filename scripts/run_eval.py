@@ -3,6 +3,7 @@
 ```
 python scripts/run_eval.py --suite ablation    # 检索消融（只需索引，可完全离线）
 python scripts/run_eval.py --suite ragas       # RAGAS 生成侧评测（必须有真实 LLM 当裁判）
+python scripts/run_eval.py --suite metrics     # §8 成功指标（对比表完整率/拆解可用率，只读 DB）
 python scripts/run_eval.py --suite all
 ```
 

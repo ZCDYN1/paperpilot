@@ -36,6 +36,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from app.agents.nodes._common import (
     dedup_papers,
     node_event,
+    prioritize_unread,
     structured_invoke,
 )
 from app.agents.nodes.evidence import (
@@ -47,6 +48,7 @@ from app.agents.prompts import load_prompt, render_papers_block
 from app.agents.schemas import ReadOutput
 from app.agents.state import STAGE_READ, Evidence, ResearchState
 from app.core.config import get_settings
+from app.memory.long_term import safe_read_paper_ids
 
 logger = structlog.get_logger(__name__)
 
@@ -92,9 +94,31 @@ async def read_node(state: ResearchState) -> dict:
     settings = get_settings()
     retrieved = state.get("retrieved") or []
     papers = dedup_papers(retrieved)
+    # 长期记忆（产品定义 F10「下次不重复推荐」）：已精读过的论文让出候选位。
+    # ⚠️ 排除**只作用在"派哪几篇进精读"**，`state["retrieved"]` 一篇都不删。
+    #    理由不是"已读论文还会被引用"—— 它没进 prompt，模型本来也看不见它。
+    #    真正的理由是 `retrieved` 另有五个消费者：verify 用它建"合法 chunk 全集"
+    #    （`chunk_index`）、compare / write 用它做对比与成稿、finalize 用它算
+    #    "本次覆盖 N 篇"。在选篇这一步顺手删它，等于同时改掉了校验口径和报告里的数字。
+    # 已读清单跨会话读取（不传 session_id）：`session_id = run_id` 且记忆在 finalize
+    # 才写入，按会话过滤必然为空 —— 详见 app/memory/long_term.py 的★小节。
+    read_ids = await safe_read_paper_ids()
+    ordered = prioritize_unread(papers, read_ids)
     # 只对 top-k 论文做抽取：prompt 长度是真实成本，而"去重后 24 篇"
     # 里真正需要精读的是重排后的头部（产品定义 §4 的产出物 A 就是 8 篇对比表）。
-    top = papers[: settings.rerank_top_n]
+    # ⚠️ 用 `read_top_k` 而不是 `rerank_top_n`：后者是 Settings 里早就声明、但**没有任何
+    #    代码消费**的死配置 —— 用户照 README 调它压 token 成本会毫无效果。两者语义确实不同
+    #    （精读几篇 vs 每个子问题留几篇候选 / 对比表几行），所以在这里接上它。
+    top = ordered[: settings.read_top_k]
+    if read_ids:
+        # reused>0 说明未读论文不够、已读的补位回来了 —— 这是设计好的降级方向，
+        # 但要可观测：否则"排除已读"到底是生效了还是没生效，只能靠猜。
+        logger.info(
+            "read.prioritized_unread",
+            known_read=len(read_ids),
+            selected=len(top),
+            reused_read=sum(1 for p in top if str(p.get("arxiv_id")) in read_ids),
+        )
 
     if not top:
         logger.warning("read.no_papers")
@@ -220,6 +244,10 @@ async def read_node(state: ResearchState) -> dict:
                 "locator": item.locator or chunk.get("section", "abstract"),
                 "source": chunk.get("source", "abstract"),
                 "verified": False,  # 由 verify 节点写回
+                # 定位路径随证据一路流到 finalize 落库（citations.resolution_how）：
+                # 此前它只进日志（read.done），事后想查"这条引用当初怎么救回来的"
+                # 只能 grep 服务端日志。键是新增的，不参与 merge_evidence 的去重键。
+                "resolution_how": hit.how,
             }
         )
 
@@ -243,6 +271,18 @@ async def read_node(state: ResearchState) -> dict:
                 "thought",
                 node="read",
                 delta=f"去重后 {len(top)} 篇论文进入抽取，产出 {len(readings)} 条「论断 → 证据」对。",
+            ),
+            # 救回统计进 SSE（此前只在上面的 read.done 日志里）：面板时间线要能直接
+            # 回答"本次救回了几条、靠哪条路径"。**rescued=0 也照发** —— 根因已修掉时
+            # 这条事件的常态就是 0，只在非零时出现等于把回归藏起来。
+            node_event(
+                "citation_rescue",
+                node="read",
+                checked=len(parsed.claims),
+                rescued=recovered,
+                dropped=dropped,
+                recovered_by=recovered_by,
+                drop_reasons=drop_reasons,
             ),
         ],
     }

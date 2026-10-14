@@ -15,11 +15,19 @@
 
 - **混合检索**：FAISS 向量 + BM25 词面双路召回，RRF 倒数秩融合，BGE 交叉编码器重排
   （消融实验会量化每一档的效果 / 耗时权衡）
+- **三类语料过滤**：分类 / 年份 / 是否有开源仓库（`has_code` 从 arXiv 官方 `comment`、`abstract`
+  里检测仓库链接得到，检测不到就留空，不参与"有代码"这一侧的判定）；
+  也可以直接点名 2~3 篇论文只做这几篇的对比（`arxiv_ids`）
 - **多 Agent 编排**：Manager–Worker 结构，子问题并行检索，引用校验 Agent 做自我反思
 - **引用可溯源**：每条引用落在具体 chunk 上，点开可定位到章节 / 原文片段
-- **主动暴露不确定性**：报告中单列「未找到原文支撑的结论」，不假装自己都对
+- **主动暴露不确定性**：报告中单列「未找到原文支撑的结论」，并且这些论断**不会进入正文与参考文献**
+  —— 标记而不剔除等于把编造的引用换个位置放，本产品的承诺是"剔除 + 承认"
 - **实时过程可见**：SSE 流式推送节点 / 工具调用 / 召回片段，等待期间不是黑盒
+- **一键导出**：`GET /api/v1/research/{run_id}/export.md` 在服务端渲染完整报告
+  （对比表 + 正文 + 带章节定位的参考文献 + 薄弱结论 + 成本耗时 + 免责声明），下载即是用 markdown 写好的材料
 - **状态可续跑**：LangGraph SqliteSaver 持久化，中断后可恢复，不重复烧 token
+- **长期记忆**：记住关注方向 / 已读论文 / 输出偏好，**跨会话生效**。已读过的论文在下次研究时
+  让出精读候选位（检索候选一篇不删，未读不足时按重排序补位），对应产品定义 F10「下次不重复推荐」
 - **工程化**：tenacity 重试 / 超时 / 熔断、工具入参强校验、Prompt 注入防护、Token 用量统计
 - **可观测与评测**：LangSmith 全链路追踪 + RAGAS 自动评测（均为可选，不配也能跑）
 - **一键部署**：Docker Compose 多服务编排，数据持久化到 volume
@@ -130,6 +138,50 @@ EMBEDDING_DIM=1024
 
 > ⚠️ **更换 embedding 模型后必须重建索引**（不同模型的向量空间不通用）：
 > `python scripts/build_index.py`
+
+---
+
+## 接口一览
+
+Streamlit 面板只是其中一种客户端，下面这些是对外契约（`http://localhost:8000/docs` 有 OpenAPI）：
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| POST | `/api/v1/research/stream` | 发起一次研究，`text/event-stream` 流式推进程；跑到拆解后停在中断点 A |
+| POST | `/api/v1/research/{run_id}/resume` | 从中断点 A 继续（可带被用户改过的子问题） |
+| GET | `/api/v1/research/{run_id}` | run 状态、报告正文、对比表、引用、token 用量 |
+| GET | `/api/v1/research/{run_id}/citations` | 引用证据链（含章节定位与证据强度） |
+| GET | `/api/v1/research/{run_id}/export.md` | 导出 Markdown 报告（F8） |
+| GET | `/healthz` | 健康检查 + 索引状态（`index.compatible` 会告诉你换模型后该重建） |
+| GET | `/resilience` | 熔断器实时状态 |
+
+请求体里几个"会改变行为"的字段（`ResearchRequest` 是 `extra="forbid"`，拼错字段名会直接 422，
+不会静默忽略）：
+
+```jsonc
+{
+  "question": "近两年 RAG 的重排技术有哪些进展，代价是什么",
+  "session_id": "上一轮 run 所在会话的 id",   // 传了 = 追问（能读到本会话此前的问答）；不传 = 新会话
+  "language": "zh",                          // zh | en，报告与对比表字段值的输出语言
+  "top_k": 8,                                // 每个子问题**最终**保留几篇论文（不是每路召回量）
+  "rerank": true,                            // 请求级关掉交叉编码器重排（换延迟）
+  "arxiv_ids": ["2305.15334", "2401.00001"], // 只在这几篇里做对比，并且跳过按关键词抓新语料
+  "filters": {
+    "categories": ["cs.CL", "cs.IR"],        // 多分类走全局通道，不再被静默丢弃
+    "year_gte": 2024, "year_lte": 2026,
+    "has_code": true                         // true=元数据里确认有仓库链接；false=未见链接
+  }
+}
+```
+
+```bash
+# 跑完一次研究之后，把报告取成文件（未知 run_id 是 404，不会给你一份空报告）
+curl -OJ "http://localhost:8000/api/v1/research/<run_id>/export.md"
+```
+
+> ⚠️ **`Send` 扇出的分支只看得到 payload 里的键**：加新的请求级配置时，
+> 除了 `_initial_state` 要转发，还要把它放进 `app/agents/graph.py::_worker_payload`，
+> 否则它会一路传到检索节点才凭空消失（这条坑的回归钉子在 `tests/test_api_feature_switches.py`）。
 
 ---
 
@@ -254,6 +306,13 @@ python scripts/run_eval.py --suite ragas                           # 自动口�
 判定依据也一并写进 CSV（`hard_check_passed` = 「引用片段能否在原文里逐字找到」这个程序事实），
 人只需要判断「这条 quote 是否真的支撑这条 claim」。
 
+**抽样默认只取真实 LLM 的 run**（`--provider real`，可用 `mock` / `unknown` / `all` 显式取回）。
+provider 由 `token_usage.model` 反查（mock 模式下 `llm_identity()` 返回 `model="mock"`），
+每行的来源写在 CSV 的 `run_provider` 列里。之所以要过滤：mock 的校验分支按设计永远放行，
+那些行的 `verified=true` 是**结构恒真**，让人核对它们既浪费人力、又会把人工口径系统性拉高。
+没跑到 `finalize` 的 run 没有 `token_usage` 行，来源确实不可考 —— 如实标 `unknown` 并同样不抽，
+不猜测也不静默丢弃。
+
 **两个口径实测出来的数字差得很远，这正是它值得做的理由：**
 
 | 口径 | 数值 | 说明 |
@@ -278,10 +337,94 @@ python scripts/run_eval.py --suite ragas                           # 自动口�
 模型产出的 `(paper_id, chunk_id)` 直接精确命中，`swapped_chunk` / `quote` 两条兜底路径**一次都没再触发**
 （保留它们是为了吃掉残差：实测必填之后模型在没把握时会吐 `-1` 这类占位值）。
 
+**这张表现在可以自查，不必信我们的日志**：救回统计已经从后端日志搬到对外契约上 ——
+SSE 第 16 种事件 `citation_rescue`（read / verify 各发一条），以及 `citations` 表新增的
+`resolution_how` / `verify_reanchored` 两列。跑完一次研究后直接查分布：
+
+```bash
+python -c "import sqlite3;print(sqlite3.connect('data/sqlite/paperpilot.db').execute(\
+'select resolution_how, verify_reanchored, count(*) from citations group by 1,2').fetchall())"
+# 形如 [(None, None, 152), ('exact', 0, 19)] —— NULL 是加列之前的历史行（当时没记录）
+```
+
+⚠️ `rescued=0` 也**照发照存**：只在非零时出现的指标无法区分"根因确实修好了"与"统计断线了"，
+而这条统计存在的意义正是随时验证修复没有回退。
+
 剩下的 0.61 是**另一件事，而且不是链路缺陷**：7B 级模型会把摘要里的内容改写几个词再"引用"，
 被硬校验逐字比对拒掉 —— 这正是这条校验存在的意义（宁缺毋滥）。
 它靠换更大的模型或接 API provider 来解决，而不是靠放松校验；把阈值调松等于把
 "每条引用都能回到原文"这条产品承诺关掉。样本只有 18 条，真实 provider 下的数字还要重测。
+
+---
+
+### 已知边界与换真实 API 时的排查点
+
+这一节把"当前测出来是什么样、以及换 provider 之后该先看什么"写清楚，避免下一次排查从零猜起。
+
+**1. 换 provider 时，provider / model / base_url / key 四项必须一起换**
+`.env.example` 出厂是一套自洽的 API 配置（`LLM_PROVIDER=openai` + `OPENAI_BASE_URL=https://api.deepseek.com/v1`
++ `LLM_MODEL=deepseek-chat`，只需要补 key）。本机开发时把它改成了 `LLM_PROVIDER=ollama`
+却沿用了 `deepseek-chat`，而 ollama 里实际只有 `bge-m3` / `nomic-embed-text` / `qwen2.5:7b` ——
+于是第一次 LLM 调用就失败。"只改 provider 不改模型名"是这类故障最常见的形态，
+而 `verify_wiring.py` 已覆盖"模型不存在（404）"会以异常抛出、不会静默返回空结果。
+本文所有真实数字都是在覆盖 `LLM_MODEL=qwen2.5:7b` 之后测得的。
+
+**2. `0.61` 是"当前模型的上限"，不是"链路的上限"**
+一次完整的真实端到端（26 条引用）里，只有 9 条通过校验（**0.35**），而**全部 26 条都走 `exact` 路径、
+0 条需要重锚、0 条被定位失败剔除**。这两个数放在一起才是结论：
+失败与引用定位无关，纯粹是这个量级模型的引文保真度不够。
+
+换 provider 后用这条查询就能自己分辨回归属于哪一类：
+
+```bash
+python -c "import sqlite3;print(sqlite3.connect('data/sqlite/paperpilot.db').execute(\
+'select resolution_how, verify_reanchored, count(*) from citations group by 1,2').fetchall())"
+```
+
+- `resolution_how` 里**非 `exact` 的比例上升** → 是**定位**出问题了（渲染契约或 schema 被改动过）；
+- **仍全是 `exact` 但 `verified` 偏低** → 是**模型**引文保真度问题，不要动校验阈值。
+
+**3. 长期记忆的「避免重复精读」在 24 篇语料上没有发挥空间**
+实测日志 `read.prioritized_unread known_read=19 reused_read=8 selected=8`：
+8 个精读位全部由已读论文补位，功能正确执行却带不来任何新论文。
+原因是 sample_data 只有 24 篇，其中 18 篇已被真实运行精读过（清理脚本污染后仍未读只有 6 篇）。
+这条机制要产生可见价值需要把语料扩到产品定义 §8 的 20+ 篇覆盖 / 数百篇入库规模，**目前刻意未做**。
+判断它是否在工作，看 `known_read>0` —— 若为 0 且整行日志不出现，说明已读清单没读到东西，
+优先怀疑下一项。
+
+**4. 会话内追问可用，但"追问"目前不等于"便宜"**
+`session_id` 是可选的会话加入凭证：客户端传它，本次提问就挂进那个会话，`plan` 节点会读回
+该会话此前的问答（`short_term.load_context`）注入拆解 prompt，指代（"那方法 B"）因此能被补全。
+不传则 `session_id = run_id`，一次提问即一个全新会话（老行为不变）。
+注意两条边界：① `thread_id` **永远是 run 级**，会话靠 `session_id` 串多个 run，
+共用 checkpoint thread 会让新提问接着上一轮已跑完的 state 走（不报错，只是被污染）；
+② 追问仍然会走完整的 `ensure_corpus → retrieve` 链路，**不会**复用上一轮已检索到的内容 ——
+"基于已读论文继续问、不重新检索"目前是待实现项，不是现状。
+长期记忆则是另一套口径：它属于用户、跨会话生效，读取与淘汰都不按会话过滤。
+⚠️ 若将来接多用户或部署成公共服务，这里**必须**换成显式的 user id，否则记忆会跨用户串。
+
+**5. 评测样本量都很小，不要把小数当稳定值**
+自动口径的 0.61 来自 2 条问题 / 18 条引用，0.35 来自 1 条问题 / 26 条引用。
+两者都远不足以支撑"引用准确率是 X"这种表述，只能说明量级和失败归因。
+人工口径的 20 条 `human_verdict` **尚未填写**（抽样已默认只取真实 LLM 的 run），
+所以两个口径目前只有一个能报。
+
+**6. 验证脚本不会污染数据**
+`scripts/verify_agents.py` 跑完整图（含 `finalize` 写记忆），因此它把库**复制到临时目录**再跑，
+结束后删除副本。历史版本直接写真实库，把合成 run 的论文标记成"已读"——
+在长期记忆变成跨会话生效之后，这种污染会让排除机制逐步失效且不报错。
+
+**7. 功能覆盖到哪一步**
+P0（F1 拆解可编辑 / F2 三类过滤 / F3 混合检索+重排 / F4 对比表 / F5 引用溯源 /
+F6 引用校验并剔除无支撑论断 / F7 SSE 过程可见 / F8 导出 Markdown）后端全部可用，
+`tests/test_api_feature_switches.py` 有一条从 HTTP 打到节点的真实链路冒烟。
+P1 里已做 F9（见上一节边界）、F10、F14（`arxiv_ids` 定向对比）、F17（`language` 中英切换）。
+**未做**：F11 术语悬停解释、F12 方法演进时间线、F13 单篇深挖模式，
+以及 P2 的 F15 上传自有 PDF（与本文 §7「不解析 PDF」的边界冲突，需要先重新讨论边界）、
+F16 引用关系图（要新增引用边表 + OpenAlex references）、F18 相关工作章节草稿、
+F19 会议/期刊分级与被引趋势（现在只有 `venue` 正则与单次被引数）。
+另外这些对外接口目前只有脚本入口、没有 HTTP 路由：`/api/v1/papers`、`/api/v1/papers/ingest`、
+`/api/v1/eval/run`、`/api/v1/metrics/tokens`。
 
 ---
 

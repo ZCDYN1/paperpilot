@@ -17,8 +17,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import sys
+import tempfile
 import uuid
+from pathlib import Path
 
 # ---- 环境必须在 import app.* 之前设好（Settings 是 lru_cache 单例）----
 os.environ.setdefault("LLM_PROVIDER", "mock")
@@ -27,8 +30,23 @@ os.environ.setdefault("RERANK_PROVIDER", "lexical")
 # 让 5 篇本地语料就算"达标"，从而**完全离线**（不触发 arXiv 抓取与 3s 限速）
 os.environ.setdefault("MIN_CORPUS", "3")
 
+# ---- ★ 数据库隔离：复制一份到临时目录，所有写入都落在副本上 ----
+# 这个脚本会跑完整图（含 finalize 写长期记忆），而长期记忆现在是**跨会话生效**的：
+# `read` 节点会拿"已读论文清单"排除精读候选（架构 §9.1）。所以往真实库里写合成 run 的
+# 记忆不是无害的 —— 每跑一次就把一批语料标记成"已读"，反复运行最终会把整个语料标记完，
+# 之后每次真实运行都只能走补位分支。而这种退化**不报错**，只会让功能悄悄失效。
+# 用复制而不是空库：脚本依赖库里已入库的语料才能保持离线（见上面的 MIN_CORPUS）。
+_SRC_DB_DIR = Path(__file__).resolve().parents[1] / "data" / "sqlite"
+_TMP_DB_DIR = Path(tempfile.mkdtemp(prefix="paperpilot_verify_"))
+for _src in _SRC_DB_DIR.glob("*.db*"):  # 含 -wal / -shm，漏掉会丢失最近未 checkpoint 的写入
+    shutil.copy2(_src, _TMP_DB_DIR / _src.name)
+os.environ["SQLITE_DIR"] = str(_TMP_DB_DIR)
+os.environ["SQLITE_URL"] = f"sqlite+aiosqlite:///{_TMP_DB_DIR / 'paperpilot.db'}"
+os.environ["CHECKPOINT_DB"] = str(_TMP_DB_DIR / "checkpoints.db")
+
 from app.agents.graph import build_graph, decide_after_verify, open_checkpointer  # noqa: E402
 from app.agents.nodes import read_invocations, reset_read_counter  # noqa: E402
+from app.db.session import dispose_engine  # noqa: E402
 from app.observability.events import SSEEmitter  # noqa: E402
 
 
@@ -191,4 +209,12 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    try:
+        sys.exit(asyncio.run(main()))
+    finally:
+        # 先释放引擎再删目录：Windows 上 SQLite 句柄未关闭会让删除失败（ignore_errors 兜底）
+        try:
+            asyncio.run(dispose_engine())
+        except Exception:  # noqa: BLE001 - 清理失败不影响脚本退出码
+            pass
+        shutil.rmtree(_TMP_DB_DIR, ignore_errors=True)

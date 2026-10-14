@@ -189,12 +189,16 @@ async def temp_db(monkeypatch, tmp_path):
 
 
 async def test_fetch_pool_maps_rows(temp_db):
+    from app.db.models import TokenUsage
+
     async with temp_db() as session:
         session.add_all(
             [
                 Citation(run_id="r1", claim="c1", quote="q1", verified=True),
                 Citation(run_id="r1", claim="c2", quote="q2", verified=False, note="引文未逐字匹配"),
                 Citation(run_id="r2", claim="c3", quote="q3", verified=None),
+                # r1 有 token_usage（真实模型）→ real；r2 没有 → unknown（来源不可考，不猜测）
+                TokenUsage(run_id="r1", node_name="all", model="qwen2.5:7b"),
             ]
         )
     pool = await spot.fetch_pool()
@@ -204,12 +208,18 @@ async def test_fetch_pool_maps_rows(temp_db):
     assert by_claim["c2"]["auto_verified"] == "False"
     assert by_claim["c2"]["chunk_text"] == ""      # chunk_id 为空 → 原文缺失，人工据此判 unsupported
     assert by_claim["c3"]["auto_verified"] == ""   # None = 未校验，导出为空串
+    assert by_claim["c1"]["run_provider"] == "real"
+    assert by_claim["c3"]["run_provider"] == "unknown"
 
 
 async def test_cmd_export_end_to_end(temp_db, tmp_path, capsys):
+    from app.db.models import TokenUsage
+
     async with temp_db() as session:
         for i in range(25):
             session.add(Citation(run_id=f"r{i % 3}", claim=f"c{i}", quote=f"q{i}", verified=True))
+        for rid in ("r0", "r1", "r2"):
+            session.add(TokenUsage(run_id=rid, node_name="all", model="qwen2.5:7b"))
     out = tmp_path / "out.csv"
     code = await spot.cmd_export(n=20, seed=7, out_path=out)
     assert code == 0
@@ -217,6 +227,7 @@ async def test_cmd_export_end_to_end(temp_db, tmp_path, capsys):
         rows = list(csvlib.DictReader(fh))
     assert len(rows) == 20
     assert all(r["human_verdict"] == "" for r in rows)
+    assert all(r["run_provider"] == "real" for r in rows)
     assert spot.DEFAULT_N == 20  # 架构 §12 的"抽 20 条"
 
 
@@ -232,12 +243,19 @@ async def test_export_fill_backfill_round_trip(temp_db, tmp_path, capsys):
     三种判定都填：supported / unsupported / ambiguous（外加一条未校验的 None），
     顺带把"未判定不进分母""未校验不进一致率分母"这两条口径在真实导出文件上复核一遍。
     """
-    from app.db.models import Paper, PaperChunk
+    from app.db.models import Paper, PaperChunk, TokenUsage
 
     async with temp_db() as session:
         session.add(Paper(arxiv_id="2401.00001", title="t"))
         chunk = PaperChunk(arxiv_id="2401.00001", chunk_index=0, section="abstract", text="RRF 融合原文。")
         session.add(chunk)
+        # r1/r2 标为真实 run，否则默认 --provider real 会把整个池子过滤光
+        session.add_all(
+            [
+                TokenUsage(run_id="r1", node_name="all", model="qwen2.5:7b"),
+                TokenUsage(run_id="r2", node_name="all", model="qwen2.5:7b"),
+            ]
+        )
         await session.flush()
         session.add_all(
             [

@@ -41,6 +41,10 @@ async def load_chunk_records() -> tuple[list[ChunkRecord], dict[str, str]]:
         titles = {p.arxiv_id: p.title for p in papers}
         years = {p.arxiv_id: (p.published.year if p.published else None) for p in papers}
         categories = {p.arxiv_id: p.primary_category for p in papers}
+        # 「是否有开源仓库」必须一起带进索引：`make index` 是别人 clone 后的冷启动路径，
+        # 这里不取，索引元数据里这一列就全是 None，F2 的 has_code 过滤只在"节点自己重建索引"
+        # 时好使 —— 又是一类"字段存在却没接通"的静默缺口（口径见 ensure_corpus.load_corpus）。
+        has_codes = {p.arxiv_id: p.has_code for p in papers}
 
         rows = (
             (await session.execute(select(PaperChunk).order_by(PaperChunk.id)))
@@ -59,6 +63,7 @@ async def load_chunk_records() -> tuple[list[ChunkRecord], dict[str, str]]:
             year=years.get(row.arxiv_id),
             primary_category=categories.get(row.arxiv_id),
             page=row.page,
+            has_code=has_codes.get(row.arxiv_id),
         )
         for row in rows
     ]

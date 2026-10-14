@@ -52,7 +52,7 @@ def _hard_check(
     known: dict,
     papers: dict[str, PaperChunks],
     chunk_lookup: dict[int, tuple[str, dict]] | None = None,
-) -> tuple[bool, str, dict]:
+) -> tuple[bool, str, dict, str]:
     """硬校验：引文必须能在原文里逐字（忽略空白差异）找到。
 
     两步：先按 `(论文, chunk_id)` 精确查，查不到再按逐字引文在**同一篇内**重锚
@@ -64,11 +64,14 @@ def _hard_check(
     症状是这条引用在库里仍然指向一个不存在的片段
     （`finalize` 的外键保护会把它写成 NULL），于是 `/citations` 与人工抽检导出里的
     原文列是空的，而抽检的判定依据恰恰是"原文里能不能找到" —— 人工口径会被系统性拉低。
+
+    第四个返回值是**定位路径**（`Resolution.how`；没定位到时为空串），
+    供 verify 侧的 `citation_rescue` 事件统计"重锚靠的是哪条路径"。
     """
     chunk = known.get((citation.get("paper_id"), citation.get("chunk_id")))
     if chunk is not None:
         ok, reason = _quote_in_chunk(citation, chunk)
-        return ok, reason, (_anchor(chunk, citation.get("paper_id")) if ok else {})
+        return ok, reason, (_anchor(chunk, citation.get("paper_id")) if ok else {}), "exact"
 
     hit = resolve_citation(
         papers,
@@ -86,9 +89,10 @@ def _hard_check(
                 REASON_EMPTY_QUOTE: "引文为空",
             }.get(hit.reason, "引用无法定位"),
             {},
+            "",
         )
     ok, reason = _quote_in_chunk(citation, hit.chunk)
-    return ok, reason, (_anchor(hit.chunk, hit.paper_id) if ok else {})
+    return ok, reason, (_anchor(hit.chunk, hit.paper_id) if ok else {}), hit.how
 
 
 def _anchor(chunk: dict, paper_id: Any) -> dict:
@@ -152,7 +156,7 @@ async def verify_node(state: ResearchState) -> dict:
         }
 
     # ---- 第一层：硬校验 ----
-    hard: dict[int, tuple[bool, str, dict]] = {}
+    hard: dict[int, tuple[bool, str, dict, str]] = {}
     for i, cit in enumerate(citations):
         hard[i] = _hard_check(cit, known, papers_by_id, chunk_lookup)
 
@@ -193,8 +197,12 @@ async def verify_node(state: ResearchState) -> dict:
     unsupported: list[str] = []
     updated: list[Evidence] = []
     ok_count = 0
+    # verify 侧重锚的计数（此前只进 verify.citation_reanchored 日志）：
+    # 与 read 侧一样，走 citation_rescue 事件对外报，0 也照发。
+    reanchored = 0
+    reanchored_by: dict[str, int] = {}
     for i, cit in enumerate(citations):
-        hard_ok, hard_reason, anchor = hard[i]
+        hard_ok, hard_reason, anchor, how = hard[i]
         soft_ok = soft_by_claim.get((cit.get("claim") or "").strip(), True)  # 软校验缺席时不过度拦截
         ok = hard_ok and soft_ok
         reason = ""
@@ -210,11 +218,14 @@ async def verify_node(state: ResearchState) -> dict:
         # 定位被纠正过才记这一笔（精确命中时 anchor 与原值相同，写进去只会让下游误判"有过修复"）
         if anchor and int(anchor["resolved_chunk_id"]) != int(cit.get("chunk_id") or -1):
             updated_item.update(anchor)
+            reanchored += 1
+            reanchored_by[how] = reanchored_by.get(how, 0) + 1
             logger.info(
                 "verify.citation_reanchored",
                 paper=cit.get("paper_id"),
                 claimed_chunk=cit.get("chunk_id"),
                 actual_chunk=anchor["resolved_chunk_id"],
+                how=how,
             )
         updated.append(updated_item)
 
@@ -245,7 +256,16 @@ async def verify_node(state: ResearchState) -> dict:
                 unsupported=unsupported,
                 revision_count=int(state.get("revision_count", 0)),
                 checked=len(citations),
-            )
+            ),
+            # verify 侧的重锚统计：与 read 侧的 citation_rescue 同型（node 字段区分来源）。
+            # rescued=0 也照发 —— 这条统计的用途是"随时验证根因修复没有回退"。
+            node_event(
+                "citation_rescue",
+                node="verify",
+                checked=len(citations),
+                rescued=reanchored,
+                recovered_by=reanchored_by,
+            ),
         ],
     }
 

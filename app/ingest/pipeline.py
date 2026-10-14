@@ -14,8 +14,8 @@
   一篇论文挂了就放弃整次检索，产品体验上等于不可用。
 - **网络阶段与数据库事务分离**：先抓完再一次性写库，避免在长事务里等网络，
   否则会长时间持有 SQLite 写锁，与 LangGraph checkpointer / 其他分支互相阻塞。
-- **落库字段的来源口径**：文本字段来自 arXiv 官方，被引数/开放性来自 OpenAlex
-  （且已交叉校验），发表会议从 `comment` 正则抽取（ADR D9）。
+- **落库字段的来源口径**：文本字段来自 arXiv 官方，被引数来自 OpenAlex
+  （且已交叉校验），发表会议与「是否有代码」从 `comment`/`abstract` 正则抽取（ADR D9/D7）。
 """
 
 from __future__ import annotations
@@ -71,6 +71,26 @@ def extract_venue(comment: str | None) -> str | None:
         # 太长基本是正则跑偏吞进了整句话，宁可不要
         if 2 <= len(venue) <= 100:
             return venue
+    return None
+
+
+# 「是否有代码」（F2 第三类过滤）只从 arXiv 官方元数据判定（ADR D7：文本字段只采信
+# arXiv 官方；D9 同款思路——comment/abstract 是作者自填、arXiv 托管的自由文本）。
+# 只认真正"指向仓库/模型页"的链接：域名后必须跟 `/路径`，裸域名（如行文里的
+# "GitHub.com 是托管平台"）不算 —— 误判成 True 会被过滤当成真阳性，比漏判更坑。
+# 识别不到返回 None 而不是 False：元数据里没有链接 ≠ 论文没有代码，不许编造；
+# "未见链接"这一保守口径由检索侧 `_prefilter` 负责解释（见 MetadataFilter.has_code）。
+_CODE_URL_RE = re.compile(
+    r"(?:github|gitlab)\.com/|huggingface\.co/|bitbucket\.org/",
+    re.I,  # comment 里链接大小写混用（GitHub/GITHUB）
+)
+
+
+def detect_has_code(comment: str | None, abstract: str | None) -> bool | None:
+    """从 arXiv 官方元数据识别开源仓库链接。检测到返回 True，否则 None。"""
+    for text in (comment, abstract):
+        if text and _CODE_URL_RE.search(text):
+            return True
     return None
 
 
@@ -158,6 +178,8 @@ async def _load_cache(
                     year=year,
                     primary_category=paper.primary_category,
                     page=row.page,
+                    # 缓存论文沿用入库时已判定的 has_code（同一口径，不在读侧重新检测）
+                    has_code=paper.has_code,
                 )
             )
         titles[arxiv_id] = paper.title
@@ -211,7 +233,9 @@ def _paper_row(paper: ArxivPaper, metrics: OpenAlexMetrics | None) -> Paper:
         cited_at=metrics.cited_at if metrics else None,
         pdf_url=paper.pdf_url,
         html_url=paper.html_url,
-        has_code=None,
+        # F2「是否有代码」：从 arXiv 官方元数据（comment/abstract）检测仓库链接（D7）。
+        # 检测不到留 None —— 不写 False，那是编造。
+        has_code=detect_has_code(paper.comment, paper.abstract),
     )
 
 
@@ -262,6 +286,8 @@ async def _persist(
                     year=paper.year,
                     primary_category=paper.primary_category,
                     page=chunk.page,
+                    # 与 _paper_row 写入 DB 的同一纯函数结果（口径必须一致）
+                    has_code=detect_has_code(paper.comment, paper.abstract),
                 )
             )
         titles[paper.arxiv_id] = paper.title
@@ -471,4 +497,11 @@ if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
 
 
-__all__ = ["IngestResult", "IngestStats", "extract_venue", "ingest", "main"]
+__all__ = [
+    "IngestResult",
+    "IngestStats",
+    "detect_has_code",
+    "extract_venue",
+    "ingest",
+    "main",
+]

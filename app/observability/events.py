@@ -1,6 +1,6 @@
 """SSE 事件发射器（架构 §8）。
 
-## 为什么把事件协议单独成模块、并强约束成 15 种
+## 为什么把事件协议单独成模块、并强约束成枚举（架构 §8 的 15 种 + 第 16 种 `citation_rescue`）
 SSE 协议**一旦上线就是对外契约**：Streamlit 面板、未来的 React 前端、以及
 用户自己写的消费脚本都依赖它。加字段容易、改字段难，所以要满足三点：
 1. 类型**枚举化**（`EVENT_TYPES`）：拼错的事件名会被当场拒绝，而不是静默丢失；
@@ -28,7 +28,11 @@ logger = structlog.get_logger(__name__)
 
 SCHEMA_VERSION = "1"
 
-# 15 种事件类型（架构 §8 事件表）。顺序与文档一致，便于逐条核对。
+# 16 种事件类型：前 15 种与架构 §8 事件表逐条对应（顺序一致，便于核对）；
+# 第 16 种 `citation_rescue` 是观测面补强（引用定位的救回/剔除统计），追加在末尾，
+# 不打乱文档顺序。它必须**每次都发**（哪怕救回 0 条）—— 只在非零时出现的事件
+# 无法区分"根因已修掉"与"统计断线了"，而这条统计存在的意义正是验证根因修复没有回退
+# （见 `app/agents/nodes/evidence.py` 的 `Resolution.how`）。
 EVENT_TYPES: tuple[str, ...] = (
     "run_started",
     "node_started",
@@ -45,6 +49,7 @@ EVENT_TYPES: tuple[str, ...] = (
     "token_usage",
     "error",
     "done",
+    "citation_rescue",
 )
 
 _EVENT_TYPE_SET = frozenset(EVENT_TYPES)
@@ -207,7 +212,7 @@ class SSEEmitter:
     def _now_ms() -> int:
         return int(time.time() * 1000)
 
-    # ----------------------------------------------------- 15 种事件的便捷方法
+    # ----------------------------------------------------- 16 种事件的便捷方法
     # 之所以给每种事件都写一个方法（而不是让调用方手写字符串）：
     # 参数名即契约，IDE 能补全、改字段时能找到所有调用点。
     def run_started(self, question: str, *, extra: dict[str, Any] | None = None) -> SSEEvent:
@@ -315,6 +320,32 @@ class SSEEmitter:
 
     def done(self, status: str = "ok") -> SSEEvent:
         return self.emit("done", run_id=self.run_id, status=status)
+
+    def citation_rescue(
+        self,
+        node: str,
+        *,
+        checked: int,
+        rescued: int,
+        dropped: int = 0,
+        recovered_by: dict[str, int] | None = None,
+        drop_reasons: dict[str, int] | None = None,
+    ) -> SSEEvent:
+        """引用定位的救回统计（`Resolution.how` 三条路径 + verify 重锚的对外出口）。
+
+        `node` 标明统计来自哪一步（read=抽取侧兜底，verify=校验侧重锚）；
+        `rescued=0` 也必须发 —— 这条事件的用途是"随时验证根因修复没有回退"，
+        只在非零时出现等于把回归藏起来。
+        """
+        return self.emit(
+            "citation_rescue",
+            node=node,
+            checked=checked,
+            rescued=rescued,
+            dropped=dropped,
+            recovered_by=recovered_by or {},
+            drop_reasons=drop_reasons or {},
+        )
 
     # ------------------------------------------------------------- 图级流式
     async def stream(

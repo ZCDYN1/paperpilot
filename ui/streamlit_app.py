@@ -16,6 +16,7 @@ import asyncio
 import json
 import os
 import sys
+import uuid
 from pathlib import Path
 
 import requests
@@ -41,12 +42,47 @@ for key, default in {
     "retrieval_hits": [],
     "verification": None,
     "last_error": None,
+    # 引用定位的救回统计（SSE `citation_rescue` 事件，read / verify 各一条）。
+    # 根因修掉后常态是全 0 —— 照存照显，"0 救回"本身就是需要看见的结论。
+    "rescue_events": [],
+    # ★ 会话 id（F9「会话内追问」）：面板自己生成并持有，每次提问都带上它，
+    # 后端才会把这几轮串成同一个会话、把上一轮的问答读回拆解子问题的 prompt。
+    # 面板上必须**看得见**它：会话是跨浏览器刷新有价值的东西，看不见就没法接着用。
+    "session_id": None,
     # 下面三项只存在于 state，不在 SSE 事件流里 —— 流结束后补拉一次
     "comparison": [],
     "token_by_node": {},
     "memory_context": [],
 }.items():
     st.session_state.setdefault(key, default)
+
+
+def _ensure_session_id() -> str:
+    """取当前会话 id，没有就生成一个（幂等：同一面板进程内反复调用返回同一个值）。"""
+    sid = st.session_state.get("session_id")
+    if not sid:
+        sid = uuid.uuid4().hex[:16]
+        st.session_state["session_id"] = sid
+    return sid
+
+
+def _reset_session() -> None:
+    """开新会话：换 session_id 并清空与上一段对话相关的展示位。
+
+    必须一起清 —— 只换 id 而留着旧报告的话，用户会以为新会话"继承"了旧内容，
+    而那恰好是这次改动想消灭的误解（追问继承上下文，新会话不该）。
+    """
+    st.session_state["session_id"] = uuid.uuid4().hex[:16]
+    st.session_state["run_id"] = None
+    st.session_state["report"] = ""
+    st.session_state["timeline"] = []
+    st.session_state["citations"] = []
+    st.session_state["retrieval_hits"] = []
+    st.session_state["rescue_events"] = []
+    st.session_state["comparison"] = []
+    st.session_state["verification"] = None
+    st.session_state["awaiting_resume"] = False
+    st.session_state["pending_sub_questions"] = []
 
 
 # ================================================================ SSE 消费
@@ -59,6 +95,7 @@ def consume_stream(url: str, payload: dict | None, timeline_box, report_box, met
     st.session_state.verification = None
     st.session_state.awaiting_resume = False
     st.session_state.last_error = None
+    st.session_state.rescue_events = []
 
     event_type = ""
     try:
@@ -88,6 +125,10 @@ def consume_stream(url: str, payload: dict | None, timeline_box, report_box, met
 
                 elif event_type == "plan_created":
                     st.session_state.pending_sub_questions = data.get("sub_questions") or []
+                    # F9 的可见证据：本轮拆解带进了几段会话上下文（0 = 首轮或降级）
+                    history_count = data.get("history_count")
+                    if history_count:
+                        st.session_state.timeline.append(f"🧠 已带入本会话此前 {history_count} 段对话作为上下文")
                     timeline_box.markdown(_render_timeline(st.session_state.timeline, data))
 
                 elif event_type == "corpus":
@@ -108,6 +149,14 @@ def consume_stream(url: str, payload: dict | None, timeline_box, report_box, met
                         f"引用校验：{'通过' if data.get('passed') else '不通过'}"
                         f"（score={data.get('score')}，第 {data.get('revision_count')} 次）"
                     )
+                    timeline_box.markdown(_render_timeline(st.session_state.timeline, None))
+
+                elif event_type == "citation_rescue":
+                    # 引用定位的救回统计（read=抽取侧兜底 / verify=校验侧重锚）。
+                    # rescued=0 也照发照显：这条统计的用途是"随时验证根因修复没有回退"，
+                    # 只在非零时显示等于把回归藏起来。
+                    st.session_state.rescue_events.append(data)
+                    st.session_state.timeline.append(_rescue_summary(data))
                     timeline_box.markdown(_render_timeline(st.session_state.timeline, None))
 
                 elif event_type in ("thought", "token"):
@@ -169,6 +218,26 @@ def _render_timeline(lines: list[str], plan: dict | None) -> str:
             out.append(f"- {sq.get('text', '')}")
             out.append(f"  - keywords: `{sq.get('keywords')}`")
     return "\n".join(out)
+
+
+# `citation_rescue` 事件里 node 字段的中文标签（read=抽取侧三条兜底路径，verify=校验侧重锚）
+_RESCUE_NODE_LABELS = {"read": "抽取侧", "verify": "校验侧"}
+
+
+def _rescue_summary(data: dict) -> str:
+    """把一条 `citation_rescue` 事件渲染成时间线里的一行（rescued=0 也如实显示）。"""
+    label = _RESCUE_NODE_LABELS.get(data.get("node"), data.get("node", "?"))
+    by = data.get("recovered_by") or {}
+    by_txt = "、".join(f"{k}={v}" for k, v in by.items()) if by else "无"
+    line = (
+        f"引用定位（{label}）：检查 {data.get('checked', 0)} 条 · "
+        f"救回 {data.get('rescued', 0)}（路径：{by_txt}）"
+    )
+    dropped = data.get("dropped") or 0
+    if data.get("node") == "read":
+        # 剔除数只在 read 侧有意义（verify 不剔引用，只判通过与否）
+        line += f" · 剔除 {dropped}"
+    return line
 
 
 # 对比表的列定义（顺序即展示顺序）。空值统一渲染成「—」——
@@ -254,7 +323,21 @@ def _fetch_citation_accuracy(api_base: str, run_id: str) -> dict:
     accuracy = payload.get("verified_rate")
     if accuracy is None and total:
         accuracy = round(verified / total, 4)
-    return {"total": total, "verified": verified, "accuracy": accuracy, "method": "auto"}
+    # 救回条数：read 侧走了非 exact 路径（quote / swapped_chunk），或 verify 侧又重锚过。
+    # resolution_how=None 是迁移前的历史行（当时没记录），按"未知"处理、不计入救回。
+    rescued = sum(
+        1
+        for c in citations
+        if (c.get("resolution_how") is not None and c.get("resolution_how") != "exact")
+        or c.get("verify_reanchored")
+    )
+    return {
+        "total": total,
+        "verified": verified,
+        "accuracy": accuracy,
+        "rescued": rescued,
+        "method": "auto",
+    }
 
 
 def _run_ragas_local(run_id: str | None):
@@ -291,6 +374,14 @@ tab_research, tab_search, tab_eval, tab_status = st.tabs(
 
 # ================================================================== 深度研究
 with tab_research:
+    # ---- 会话（F9）：面板持有 session_id，多次提问串成一个会话 ----
+    new_session = st.button(
+        "🆕 新会话（清空上下文，重新开一段对话）", key="new_session", use_container_width=False
+    )
+    if new_session:
+        _reset_session()
+    session_id = _ensure_session_id()
+
     col1, col2 = st.columns([3, 1])
     with col1:
         question = st.text_input(
@@ -298,6 +389,10 @@ with tab_research:
             value="近两年 RAG 的重排（reranking）技术有哪些进展，各自的代价是什么？",
         )
         top_k = st.slider("每个子问题召回论文数", 1, 20, 8, key="research_top_k")
+        st.caption(
+            f"当前会话：`{session_id}` —— 同一会话里的后续提问会读回本会话此前的问答"
+            "（例：「那方法 X 的代价是什么？」）。换一个会话请点上面的「新会话」。"
+        )
     with col2:
         st.write("")
         st.write("")
@@ -312,7 +407,7 @@ with tab_research:
         with st.spinner("研究中…"):
             consume_stream(
                 f"{api_base}/api/v1/research/stream",
-                {"question": question.strip(), "top_k": top_k},
+                {"question": question.strip(), "top_k": top_k, "session_id": session_id},
                 timeline_box,
                 report_box,
                 meta_box,
@@ -350,8 +445,9 @@ with tab_research:
     # ---- 引用明细 ----
     # `verified` 由 verify 节点逐条写回：硬校验（引文逐字出现在定位到的 chunk 里）
     # 与 LLM 软校验两层都过才置 True，这里只做计数、不做判定。
-    # ⚠️ 刻意不区分"精确命中"与"重锚救回"：两者在 state 里同形，救回条数只在后端日志
-    # `read.done`（reanchored / recovered_by）里 —— 面板没有这些数据，就不假装能显示。
+    # 救回统计来自 SSE `citation_rescue` 事件（read / verify 各一条）：
+    # 根因（渲染块属性改名 + chunk_id 必填）修掉之后常态是全 0，0 也照显 ——
+    # 只在非零时出现的指标无法区分"根因已修掉"与"统计断线了"。
     citations = st.session_state.citations
     if citations:
         passed = sum(1 for c in citations if c.get("verified") is True)
@@ -359,6 +455,8 @@ with tab_research:
             f"引用 {len(citations)} 条 · 通过校验 {passed} · 未通过 {len(citations) - passed}"
             "（口径：引文逐字命中 + LLM 软校验两层都过，含经重锚定位后通过的引用）"
         )
+    for ev in st.session_state.rescue_events:
+        st.caption("🛟 " + _rescue_summary(ev))
 
     if st.session_state.report:
         st.divider()
@@ -472,25 +570,35 @@ with tab_status:
         "（见 `data/faiss/paperpilot.manifest.json` 的 `embedding_identity`），"
         "重排是 `bge-reranker-v2-m3`\n"
         "- LangGraph 多 Agent：拆解 → 语料保障 → 并行检索 → 抽取 → 引用校验 → 对比表 → 撰写\n"
-        "- SSE 流式（15 种事件）+ 两个 HITL 中断点\n"
+        "- SSE 流式（16 种事件）+ 两个 HITL 中断点\n"
         "- 引用可溯源：每条引用落在具体 chunk，带章节定位与证据强度\n"
         "- 引用定位三条路径：精确命中 → 字段错位纠正 → 同篇逐字引文重锚；"
         "每条都要求原文逐字对上才放行，全失败才判幻觉\n"
+        "- 引用定位的**救回统计可见**：SSE `citation_rescue` 事件 + "
+        "`citations.resolution_how` / `verify_reanchored` 两列，"
+        "时间线与下面的引用准确率都能直接看到「检查几条 · 救回几条 · 走哪条路径」（0 也照显）\n"
         "- 结构化对比表：逐字段回原文校验，缺字段留空「—」，可导出 Markdown\n"
-        "- 长期记忆已接线：`plan` 召回并注入 prompt，`finalize` 写入方向/已读/偏好\n"
+        "- 长期记忆**跨会话生效**：`plan` 召回并注入 prompt；`read` 选篇时已读论文让出候选位"
+        "（未读不足则按原顺序补位），`retrieved` 一篇不删，校验口径与「覆盖 N 篇」不受影响\n"
         "- 短期记忆写入（`finalize` 追加本轮问答）\n"
         "- Token **按节点**细分：面板与 `token_usage` 表都能看到每个节点的消耗\n"
         "- 注入防护 / 重试超时熔断"
     )
     st.markdown("#### 待办")
     st.markdown(
-        "- 长期记忆只影响 `plan` 的 prompt：检索与精读阶段不消费已读清单"
-        "（`memory_context` 只在 `planner` 里产出并写进 state），"
-        "所以「避免重复精读同一批论文」还没落地\n"
-        "- 短期记忆**只写不读**：`load_context` 目前只被单测调用，没有节点把它读回 prompt，"
-        "因此「会话内追问」还不可用\n"
-        "- 引用重锚的统计只落在后端日志（`read.done` 的 `reanchored` / `recovered_by`），"
-        "既没进 SSE 事件也没进 `citations` 表，面板无法显示「本次救回了几条」"
+        "- **会话内追问（F9）不可用**，根因有两层：短期记忆只写不读"
+        "（`load_context` 目前只被单测调用，没有节点把它读回 prompt）；"
+        "且 `research.py` 里 `session_id = run_id`、客户端无法指定 session_id，"
+        "每次提问都是全新会话 —— 复用链路要先打通，追问才谈得上\n"
+        "- 已读排除在**小语料上会饱和**：sample_data 只有 24 篇，其中 19 篇已被历史运行标记为已读。"
+        "一次真实端到端跑出来是 `known_read=19 reused_read=8 selected=8` —— "
+        "检索回的候选里没有未读论文，8 个精读位全由已读补位，功能正确执行但带不来新论文。"
+        "语料扩到 200 篇后才有意义（观测点：日志 `read.prioritized_unread`）\n"
+        "- 产品定义 §8 有三条成功指标仍未产出数字：子问题拆解可用率、对比表字段完整率"
+        "（两者都没有测量代码）、RAGAS `faithfulness` 相对纯向量基线的提升"
+        "（需真实 LLM 当裁判，且必须冻结模型/prompt/温度才有归因意义）\n"
+        "- 引用人工抽检的 20 条 `human_verdict` 待填"
+        "（抽样已改为默认只取真实 LLM 的 run：mock 的 `verified` 结构恒真，核对它会虚高人工口径）"
     )
 
 # ====================================================================== 评测
@@ -577,11 +685,12 @@ with tab_eval:
         "两个口径都要报。"
     )
     # 分母是"落库的全部引用"，所以"经引用定位救回"的条目也一并计入分子 ——
-    # 它们与精确命中的引用在库里同形（`/{run_id}/citations` 不返回定位方式，
-    # 见 app/api/v1/research.py:291-321），面板因此**不宣称**能分辨两者，只把救回的条数指向日志。
+    # 救回路径现在随 `/{run_id}/citations` 的 `resolution_how` / `verify_reanchored`
+    # 两个字段透出（此前只在后端日志 `read.done` 里），面板据此直接给出救回条数。
     st.caption(
         "统计范围：包含经引用定位（字段错位纠正 / 同篇逐字引文重锚）后通过校验的引用；"
-        "救回条数只在后端日志 `read.done` 的 `reanchored` / `recovered_by` 里，接口未透出。"
+        "救回条数按 `resolution_how != exact` 或 `verify_reanchored` 统计"
+        "（`resolution_how=None` 是迁移前的历史行，按未知处理）。"
     )
     # 后端没有"列出所有 run"的接口，因此**不新增后端接口**，改为让用户手工填写 run_id。
     st.caption("提示：后端未提供 run 列表接口，请手工填写 run_id（可在「深度研究」页拿到）。")
@@ -594,13 +703,16 @@ with tab_eval:
         else:
             try:
                 acc = _fetch_citation_accuracy(api_base, rid.strip())
-                a1, a2, a3 = st.columns(3)
+                a1, a2, a3, a4 = st.columns(4)
                 a1.metric("引用总数", acc["total"])
                 a2.metric("已校验为真", acc["verified"])
                 a3.metric(
                     "准确率",
                     "—" if acc["accuracy"] is None else f"{acc['accuracy']:.1%}",
                 )
+                # 救回 0 条也照显：根因（渲染块属性改名 + chunk_id 必填）修掉之后
+                # 0 就是常态，而这正是"根因没回退"的证据，不能只在非零时出现。
+                a4.metric("救回（定位兜底）", acc["rescued"])
                 # 明确标注口径，避免"自动口径"被误当成权威结论。
                 # 口径细节必须写清分母：后端的 `verified_rate` 是 `sum(verified) / 全部引用条数`
                 # （app/api/v1/research.py 的 `/{run_id}/citations`），
