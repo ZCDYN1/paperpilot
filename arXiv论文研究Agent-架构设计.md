@@ -160,8 +160,8 @@ paperpilot/
 │   │       ├── papers.py            # 语料分页、单篇深挖、上传、引用边、趋势
 │   │       ├── terms.py             # 术语标注与查询（F11）
 │   │       ├── stats.py             # 全局聚合指标（首页卡片 / 系统页）
-│   │       └── health.py            # /healthz 与 /resilience
-│   │       # eval.py（评测触发）仍是设计目标，未实现：现在走 scripts/run_eval.py
+│   │       ├── health.py            # /healthz 与 /resilience
+│   │       └── eval.py              # 评测触发与轮询（POST /eval/run、GET /eval/runs/{id}）
 │   ├── core/
 │   │   ├── config.py                # pydantic-settings，读 .env
 │   │   ├── logging.py               # structlog 结构化日志
@@ -606,11 +606,14 @@ RRF 只用**排名**：`Σ 1/(k + rank)`，量纲问题被彻底绕过，且对�
 | GET | `/api/v1/papers` | 语料分页查询（标题/摘要 LIKE 过滤 + 分类过滤，每行带 `chunk_count` 与 `venue_tier`） | ✅ |
 | GET | `/api/v1/stats/overview` | 全局聚合指标（论文/分块/运行数、平均支撑率、按天 runs/tokens） | ✅ |
 | POST | `/api/v1/terms` | 与 GET 同一结果，但正文走请求体（整篇报告 4700+ 字符放不进 query） | ✅ |
-| POST | `/api/v1/papers/ingest` | 按 arxiv_id / 关键词批量入库建索引 | ⏳ 待实现（现在由 `ensure_corpus` 节点与 `scripts/build_index.py` 承担） |
-| POST | `/api/v1/eval/run` | 触发 RAGAS 评测（后台任务） | ⏳ 待实现（现在走 `scripts/run_eval.py`） |
+| POST | `/api/v1/papers/ingest` | 按 `arxiv_ids` / `query` 批量入库并刷新索引；**同步 200**（arXiv 限速约 1 req/3s、50 篇封顶，入库幂等，超时原样重试即可） | ✅ |
+| POST | `/api/v1/eval/run` | 触发评测（`ablation` / `metrics` / `ragas`），202 + `eval_run_id`；并发收 `409`，缺 `[eval]` 依赖收 `501` | ✅ |
+| GET | `/api/v1/eval/runs/{eval_run_id}` | 评测状态与结果；同时返回 `status`（库里的事实）与 `is_running`（本进程闸门），进程重启后遗留的 `running` 行据此可辨 | ✅ |
 
 > 原先列在"待实现"里的 `GET /api/v1/papers`（语料分页）与 `GET /api/v1/metrics/tokens`（成本统计）
 > 已分别由 `GET /papers` 与 `GET /stats/overview` 落地，故从表中移除。
+> 至此本表**没有待实现项**：`papers/ingest` 与 `eval/run` 是最后补上的两个入口，
+> 命令行脚本（`scripts/run_eval.py`、`scripts/build_index.py`）保留为同一套服务层的快捷方式。
 
 > 「实现状态」这一列是刻意加的：上面这张表最初是**设计目标**，不是清单快照。
 > 一张看起来都像已实现的表会让人照着写前端，然后在 404 上花掉半天。

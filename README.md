@@ -196,8 +196,12 @@ Streamlit 面板只是其中一种客户端，下面这些是对外契约（`htt
 | POST | `/api/v1/papers/citations/snapshot` | 记录今天的被引数（F19 趋势的数据源，需定期调用） |
 | GET | `/api/v1/papers/{arxiv_id}/citation-trend` | 被引趋势；采样点 < 2 时 `verdict=insufficient_data`（F19） |
 | GET | `/api/v1/papers/venue-tier?venue=ACL 2024` | 会议/期刊分档，独立字段、不进 9 列对比表（F19） |
+| POST | `/api/v1/papers/ingest` | 按 `arxiv_ids` / `query` 批量抓取入库并刷新索引。**同步返回 200**：arXiv 侧限速约 1 req/3s、单次 50 篇封顶，入库幂等，客户端超时后原样重试就是最优恢复 |
 | GET | `/api/v1/terms?text=…` | 标出文本里的术语及位置（F11） |
 | GET | `/api/v1/terms/{term}` | 查单个术语；未命中是 `200 + known=false`，不是 404（F11） |
+| GET | `/api/v1/stats/overview` | 全局聚合指标（论文/分块/运行数、平均支撑率、按天 runs 与 tokens），首页卡片与系统页的数据源 |
+| POST | `/api/v1/eval/run` | 触发一次评测（`mode=ablation\|metrics\|ragas`），**202 立刻返回 `eval_run_id`**，评测在后台跑 |
+| GET | `/api/v1/eval/runs/{eval_run_id}` | 查评测状态与结果（`status` + `is_running` + 汇总 + 逐条样本） |
 | GET | `/healthz` | 健康检查 + 索引状态（`index.compatible` 会告诉你换模型后该重建） |
 | GET | `/resilience` | 熔断器实时状态 |
 
@@ -335,6 +339,40 @@ python scripts/verify_wiring.py        # 离线确定性，约 12 秒；--only A
 - **已知边界（不是 bug，但会误导使用者）**：`INPUT_MAX_CHARS=4000` 对 `question` 够不到 ——
   请求体 schema 先按 `max_length=2000` 拦下并返回 422，这道 400 的闸门只对 schema 没限死的入口生效
   （例如 resume 时用户编辑过的子问题文本）。两处错误的响应结构不同，前端需要分开处理。
+
+### 用 HTTP 触发评测（`POST /api/v1/eval/run`）
+
+`scripts/run_eval.py` 与这个接口共用同一套服务层（`app/eval/service.py`），
+所以命令行能做到的事接口也能做到，报告落库口径完全一致。评测是分钟级的，
+因此受理即 `202`、结果靠轮询，而不是把 HTTP 连接挂住：
+
+```bash
+curl -sS -X POST localhost:8000/api/v1/eval/run -H 'Content-Type: application/json' \
+  -d '{"mode":"ablation","configs":"rrf,rerank"}'
+# → {"eval_run_id":1,"status":"running","mode":"ablation","dataset":"golden_40","poll":"/api/v1/eval/runs/1"}
+
+curl -sS localhost:8000/api/v1/eval/runs/1        # status=completed 时 result.configs 就是消融表
+```
+
+| `mode` | 需要什么 | 拿不到时怎样 |
+|---|---|---|
+| `ablation` | 只要检索索引，**不需要 LLM**（六种检索配置的 nDCG@10 / MRR / Recall@K 对照） | 索引为空 → `status=unavailable` + 原因 |
+| `metrics` | 只读数据库（产品定义 §8 的成功指标） | 无数据 → 对应指标 `status` 明确标注，不填占位数 |
+| `ragas` | `pip install -e ".[eval]"` + 真实 LLM 裁判 | 缺依赖 → **501** 并附可照抄的安装命令；`LLM_PROVIDER=mock` 或未配 key → 报告 `available=false`，**绝不产出 mock 分数** |
+
+三条接口层面的取舍，都是为了不让"没跑成"看起来像"跑过了"：
+
+- **同一时刻只允许一条评测**（`409`，响应体带 `running_eval_run_id` 与轮询地址）。
+  并发跑会污染消融表的耗时列、并让两个任务抢同一份索引与模型；不做排队是因为
+  队列需要一份能活过进程重启的任务状态设施，而那超出这个项目现阶段要引入依赖的范围。
+- **依赖缺失在受理时就探测**（同步 `import` 判定，放在后台任务之外）。让后台任务去发现，
+  调用方只能先拿一个 `202`、很久之后读到 `failed` —— 而那件缺的依赖在提交那一刻就已确定。
+- `golden_path` 解析后必须仍在仓库内（先 `resolve()` 再比目录，符号链接绕不过去），
+  且只接受 `.jsonl`；越界与拼错字段都是 `422` 并带 `hint`。请求模型是 `extra="forbid"`。
+
+进程重启后，库里遗留的 `running` 行不会再被更新，所以 `GET /eval/runs/{id}` 同时返回
+`status` 与 `is_running`（后者看的是当前进程的闸门状态）—— 看到 `status=running` 但
+`is_running=false` 就知道这条已经不会被更新了，重跑一次即可。
 
 ### 引用准确率（自动口径 + 人工抽检口径）
 
@@ -476,8 +514,11 @@ python -c "import sqlite3;print(sqlite3.connect('data/sqlite/paperpilot.db').exe
 | F19 质量信号 | 分档是人工白名单（判不准就 `preprint`/`unknown`）；趋势需要**多天**采样，只调一次接口拿不到趋势 |
 | F9 追问 | 复用不了已校验证据时返回 `no_evidence`，不会悄悄退化成一次全量研究 |
 
-**还没有对外接口的部分**：评测触发（`/api/v1/eval/run`）—— 目前由 `scripts/run_eval.py` 承担。
-（原先同处列出的"语料分页查询"与"独立的成本统计接口"已补上，分别是
+产品定义 §5 的 F1~F19 与架构 §7 列出的路由**已全部有 HTTP 接口**：评测触发
+（`POST /api/v1/eval/run` + `GET /api/v1/eval/runs/{id}`）与批量入库
+（`POST /api/v1/papers/ingest`）是最后补上的三个，原先由 `scripts/run_eval.py` 与
+`ensure_corpus` 节点承担的部分现在是可选快捷路径、不再是唯一入口。
+（更早列在"待实现"里的"语料分页查询"与"独立的成本统计接口"分别是
 `GET /api/v1/papers` 与 `GET /api/v1/stats/overview`。）
 另外 **React 控制台（`web/`）已覆盖 F1~F19 的界面**；`ui/` 下的 Streamlit 面板是它的先行版本，
 保留作轻量调试入口。
@@ -504,7 +545,7 @@ arXiv论文研究Agent/
 │   ├── analysis/            # 方法演进时间线、会议/期刊分档
 │   ├── terms/               # 术语词表与文本标注
 │   ├── followup/            # 基于已校验证据的追问（不重新检索）
-│   └── api/v1/              # research / papers / terms / stats / health
+│   └── api/v1/              # research / papers / terms / stats / eval / health
 ├── web/                     # React 控制台（Vite + TS，主界面；构建后由 :8000 同源提供）
 │   ├── src/api/             # 后端契约的 TS 镜像 + 契约测试（打真实后端）
 │   └── src/pages/           # 控制台 / 报告 / 会话 / 论文库 / 分析 / 系统
