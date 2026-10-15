@@ -22,7 +22,6 @@ from langchain_core.tools import tool
 
 from app.retrieval.hybrid_retriever import (
     DEFAULT_SEARCH_CONFIG,
-    ChunkRecord,
     HybridRetriever,
     MetadataFilter,
     PaperHit,
@@ -75,18 +74,6 @@ def serialize_hit(hit: PaperHit) -> dict[str, Any]:
             }
             for c in hit.chunks
         ],
-    }
-
-
-def _record_to_dict(rec: ChunkRecord) -> dict[str, Any]:
-    return {
-        "chunk_id": rec.chunk_id,
-        "arxiv_id": rec.arxiv_id,
-        "section": rec.section,
-        "text": rec.text,
-        "source": rec.source,
-        "chunk_type": rec.chunk_type,
-        "page": rec.page,
     }
 
 

@@ -116,18 +116,3 @@ def load_golden(path: Path | str | None = None) -> list[GoldenItem]:
             items.append(item)
 
     return items
-
-
-def split_queries(items: list[GoldenItem]) -> tuple[list[str], list[str], list[list[str]], list[set[str]]]:
-    """拆成评测循环需要的形式。
-
-    Returns:
-        `(query_ids, questions, keywords_list, relevant_sets)` —— 四个列表一一对应，
-        直接喂给 `evaluate_retrieval`。
-    """
-    return (
-        [it.id for it in items],
-        [it.question for it in items],
-        [list(it.keywords) for it in items],
-        [set(it.gold_paper_ids) for it in items],
-    )

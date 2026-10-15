@@ -283,7 +283,7 @@ def _options() -> dict[str, list[str]]:
     """从 Settings 的 Literal 反射可选值，不在这里手抄。"""
     return {
         name: [str(v) for v in get_args(_field(name).annotation)]
-        for name in ("llm_provider", "llm_structured_method", "embedding_provider", "rerank_provider")
+        for name in ("llm_provider", "embedding_provider", "rerank_provider")
         if _in_settings(name)  # 字段不在 Settings 里就整个不报，别给前端一个空列表
     }
 
