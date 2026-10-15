@@ -318,10 +318,18 @@ async def paper_detail(arxiv_id: str) -> dict[str, Any]:
     chunk 上的 `source` 必须原样透出：`html` 才是正文原文，
     `abstract` / `pdf` 是另外两种证据强度，前端不能画成同一种卡片。
     """
+    doc_id = _guard_ids([arxiv_id])[0]
     try:
-        return await build_paper_detail(_guard_ids([arxiv_id])[0])
+        return await build_paper_detail(doc_id)
     except PaperNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        # 异常原文只进服务端日志：detail 原样转 str(exc) 时，底层若把查询上下文/
+        # 文件路径拼进消息，就等于向任意访问者描绘服务端内部（开源项目尤其要避免）。
+        # 对外给稳定 code + 一句人话，id 是过了字符集闸门的用户原值，回显安全。
+        logger.warning("papers.detail_not_found", arxiv_id=doc_id, error=str(exc)[:200])
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "paper_not_found", "reason": f"论文 {doc_id} 不在库中（尚未入库或 id 写错）"},
+        ) from exc
 
 
 @router.post("/{arxiv_id}/ask", summary="只在这一篇的内容上回答（F13）")
@@ -336,8 +344,15 @@ async def paper_ask(arxiv_id: str, body: AskBody) -> dict[str, Any]:
     try:
         return await ask_about_paper(doc_id, question)
     except PaperNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        # 与 `paper_detail` 同口径：异常原文只进日志，对外是稳定 code + 一句人话。
+        logger.warning("papers.ask_not_found", arxiv_id=doc_id, error=str(exc)[:200])
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "paper_not_found", "reason": f"论文 {doc_id} 不在库中（尚未入库或 id 写错）"},
+        ) from exc
     except ValueError as exc:
+        # ValueError 的取值域是服务层的输入校验（如"问题不能为空"），消息本身就是给人读的
+        logger.warning("papers.ask_invalid", arxiv_id=doc_id, error=str(exc)[:200])
         raise HTTPException(status_code=422, detail={"code": "invalid_input", "reason": str(exc)}) from exc
 
 

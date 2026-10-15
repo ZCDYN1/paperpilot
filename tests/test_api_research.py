@@ -427,6 +427,116 @@ async def test_stream_reports_internal_error_as_unrecoverable(client, monkeypatc
 
 
 # ---------------------------------------------------------------------------
+# ★ 对外错误脱敏：客户端只拿 code + 固定人话，异常原文留在服务端日志
+# ---------------------------------------------------------------------------
+# 模拟底层异常的真实泄漏面：SQL 片段 + 本机绝对路径（Windows 中文用户名）+ 连接串密钥。
+# 这份文本一旦经 `str(exc)` 进 SSE error，就是"clone 即可跑"承诺上的洞。
+_LEAKY_MSG = (
+    "sqlite3.OperationalError: no such table: citations "
+    "[SQL: SELECT * FROM research_runs WHERE id='x'] "
+    "C:\\Users\\张三\\Desktop\\project\\data\\sqlite\\paperpilot.db?password=hunter2"
+)
+
+
+def _assert_sanitized(message: str) -> None:
+    assert message, "脱敏不是清空：仍要给人话"
+    for frag in ("SELECT", "hunter2", "sqlite", "paperpilot.db", "张三", "OperationalError"):
+        assert frag not in message, f"异常原文泄出对外响应: {frag!r}"
+
+
+async def test_stream_error_message_is_sanitized_but_code_kept(client, monkeypatch):
+    """message 换固定文案的同时，code/recoverable 必须原样保留（前端契约断言吃这两键）。"""
+    from app.agents import graph as graph_mod
+
+    async def boom(state):  # noqa: ARG001
+        raise RuntimeError(_LEAKY_MSG)
+
+    monkeypatch.setattr(graph_mod, "plan_node", boom)
+    body = (await client.post(STREAM_URL, json={"question": "RAG 重排"})).text
+    err = first_data(body, "error")
+    assert err["code"] == "internal_error"
+    assert err["recoverable"] is False
+    _assert_sanitized(err["message"])
+
+
+async def test_circuit_open_error_message_is_fixed_text(client, monkeypatch):
+    from app.agents import graph as graph_mod
+    from app.core.resilience import CircuitOpenError
+
+    async def boom(state):  # noqa: ARG001
+        raise CircuitOpenError("熔断器[llm] 已打开，冷却中 /home/deploy/.env API_KEY=sk-secret")
+
+    monkeypatch.setattr(graph_mod, "plan_node", boom)
+    body = (await client.post(STREAM_URL, json={"question": "RAG 重排"})).text
+    err = first_data(body, "error")
+    assert err["code"] == "llm_circuit_open"
+    assert err["recoverable"] is True
+    assert "sk-secret" not in err["message"] and "/home" not in err["message"]
+
+
+async def test_resume_error_message_is_sanitized(client, monkeypatch):
+    """resume 失败分支同口径；且状态保持 `awaiting_input`，用户还能从断点重试。"""
+    from app.agents import graph as graph_mod
+
+    run_id, _ = await _start_and_get_run_id(client, "RAG 重排")
+
+    async def boom(state):  # noqa: ARG001
+        raise RuntimeError(_LEAKY_MSG)
+
+    monkeypatch.setattr(graph_mod, "ensure_corpus_node", boom)
+    body = (await client.post(f"/api/v1/research/{run_id}/resume", json={})).text
+    err = first_data(body, "error")
+    assert err["code"] == "resume_failed"
+    assert err["recoverable"] is False
+    _assert_sanitized(err["message"])
+
+    detail = (await client.get(f"/api/v1/research/{run_id}")).json()
+    assert detail["status"] == "awaiting_input"
+
+
+# ---------------------------------------------------------------------------
+# ★ resume 状态门禁：只有停在 HITL 中断点（awaiting_input）的 run 能续跑
+# ---------------------------------------------------------------------------
+async def test_resume_rejected_after_run_completed(client):
+    """跑完的 run 再 resume → 409 + code，而不是静默重跑一遍（重放/烧配额护栏）。"""
+    run_id, _ = await _start_and_get_run_id(client, "RAG 重排")
+    body = (await client.post(f"/api/v1/research/{run_id}/resume", json={})).text
+    assert first_data(body, "done")["status"] == "ok"
+    assert (await client.get(f"/api/v1/research/{run_id}")).json()["status"] == "completed"
+
+    resp = await client.post(f"/api/v1/research/{run_id}/resume", json={})
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["code"] == "not_resumable"
+    assert detail["status"] == "completed"
+
+    # 拒绝没有改变任何状态：run 仍是 completed，没被"再跑一遍"
+    assert (await client.get(f"/api/v1/research/{run_id}")).json()["status"] == "completed"
+
+
+async def test_resume_rejected_for_failed_run(client, monkeypatch):
+    from app.agents import graph as graph_mod
+
+    async def boom(state):  # noqa: ARG001
+        raise RuntimeError("节点失败")
+
+    monkeypatch.setattr(graph_mod, "plan_node", boom)
+    body = (await client.post(STREAM_URL, json={"question": "RAG 重排"})).text
+    run_id = first_data(body, "run_started")["run_id"]
+    assert (await client.get(f"/api/v1/research/{run_id}")).json()["status"] == "failed"
+
+    resp = await client.post(f"/api/v1/research/{run_id}/resume", json={})
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["code"] == "not_resumable"
+
+
+async def test_resume_unknown_run_is_404_with_code(client):
+    resp = await client.post("/api/v1/research/nope000000000001/resume", json={})
+    assert resp.status_code == 404
+    assert resp.json()["detail"]["code"] == "run_not_found"
+
+
+# ---------------------------------------------------------------------------
 # ★ 离线承诺：整条 API 链路在 mock + 不联网下跑通
 # ---------------------------------------------------------------------------
 async def test_full_chain_offline_smoke(monkeypatch, tmp_path):

@@ -79,6 +79,24 @@ def failure_event_code(exc: BaseException) -> tuple[str, bool]:
     return "internal_error", False
 
 
+# 对外 error.message 只允许是"一句人话"，不能是异常原文：DB / 网络层的异常文本
+# 可能带 SQL 片段、连接串、本机绝对路径（Windows 下还含中文用户名）——这是开源项目，
+# 每个 clone 者的部署环境都不该从错误响应里被推断出来。完整异常已由 logger.exception
+# 落在服务端日志，排查路径是 code + run_id → 日志。
+# ⚠️ code / recoverable 的取值是前端契约（`web/src/hooks/useResearchStream.ts` 按
+# recoverable=false 作废流式预览），脱敏只动 message，一个 code 都不能吞。
+FAILURE_MESSAGES: dict[str, str] = {
+    CIRCUIT_OPEN_CODE: "下游服务暂时不可用（熔断保护中），请稍后重试。",
+    "internal_error": "研究流程执行失败，服务端日志已记录异常详情；重试仍失败请携带 run_id 反馈。",
+    "resume_failed": "续跑执行失败，服务端日志已记录异常详情；重试仍失败请携带 run_id 反馈。",
+}
+
+
+def failure_event_message(code: str) -> str:
+    """按错误码给一句可展示的安全文案；未知 code 落到通用文案（契约只认 code 本身）。"""
+    return FAILURE_MESSAGES.get(code, FAILURE_MESSAGES["internal_error"])
+
+
 # --------------------------------------------------------------------------- 工具
 def sse_headers() -> dict[str, str]:
     """SSE 必备响应头（架构 §7）。"""
@@ -290,7 +308,7 @@ async def research_stream(req: ResearchRequest) -> StreamingResponse:
             emitter.last_status = "error"
             # 流已经开始就发不了 HTTP 错误码了，只能走 SSE error 事件（架构 §8）
             code, recoverable = failure_event_code(exc)
-            yield emitter.error("api", code, str(exc)[:300], recoverable=recoverable).to_sse()
+            yield emitter.error("api", code, failure_event_message(code), recoverable=recoverable).to_sse()
             yield emitter.done(status="error").to_sse()
         finally:
             await emitter.flush_token_usage()
@@ -303,10 +321,55 @@ async def research_stream(req: ResearchRequest) -> StreamingResponse:
 def _final_status(last_status: str) -> str:
     """把"流怎么结束的"翻成 `research_runs.status`。"""
     if last_status == "interrupted":
-        return "awaiting_input"
+        return AWAITING_INPUT_STATUS
     if last_status == "error":
         return "failed"
     return "completed"
+
+
+# `research_runs.status` 的"停在 HITL 中断点 A"取值。事实来源就这一处：
+# `_final_status()` 由流末尾的 `interrupted` 信号写入，列表页、`GET /{run_id}`、
+# 前端 `awaiting_input` 渲染消费的都是同一个值（`test_stream_interrupts_after_plan_
+# and_reports_awaiting_input` 把它钉成了回归断言）。checkpoint 的 `next` 只回答
+# "图是否停着"，回答不了"这条 run 是否还在用户可确认的窗口里"（failed/cancelled
+# 的 run 的 checkpoint 同样可能挂着未完成任务），所以门禁取数据库状态这一份既有事实。
+AWAITING_INPUT_STATUS = "awaiting_input"
+
+
+async def _ensure_resumable(run_id: str) -> None:
+    """resume 状态门禁：只放行 `awaiting_input` 的 run，其余一律 4xx。
+
+    没有这道门，任何人都能对任意 run_id 反复触发续跑（重放、白烧 LLM 配额），
+    或对已完成的 run 再跑一遍。刻意**只读不占位**：resume 期间状态保持
+    `awaiting_input`，进程中途死掉/客户端断开后 run 不会被卡在"running"死档，
+    用户仍然可以从断点重试 —— 这比堵住"同一瞬间双击两次并发 resume"的窄窗口
+    更值（串行重放已被本门禁拒绝：跑完后状态是 completed/failed）。
+    """
+    async with session_scope() as db:
+        run = await db.get(ResearchRun, run_id)
+        status = run.status if run is not None else None
+
+    if status is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "run_not_found",
+                "run_id": run_id,
+                "reason": "该 run 不存在",
+                "hint": "run_id 来自 SSE run_started 事件的 data.run_id。",
+            },
+        )
+    if status != AWAITING_INPUT_STATUS:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "not_resumable",
+                "run_id": run_id,
+                "status": status,
+                "reason": "该 run 当前不在等待用户确认子问题的状态，不能续跑",
+                "hint": "只有停在 HITL 中断点（awaiting_input）的 run 才能 resume；已完成的 run 请直接查看报告。",
+            },
+        )
 
 
 # --------------------------------------------------------------------------- HITL
@@ -330,6 +393,9 @@ async def research_resume(run_id: str, body: ResumeRequest | None = None) -> Str
     # ★ 用户在面板上编辑过的子问题是**完全用户可控的输入**，且 resume 之后紧跟着就是
     # retrieve/read/write —— 跳过这道闸门等于在"中断后继续"这条路上开了个注入后门。
     sub_questions = guard_sub_questions(body.sub_questions)
+    # ★ 状态门禁：放在返回 StreamingResponse **之前** —— 流一旦开始就只能靠 SSE error
+    # 事件报"不许续跑"，客户端拿不到状态码。被拒的 resume 一个 token 也不该烧。
+    await _ensure_resumable(run_id)
     emitter = SSEEmitter(run_id)
 
     async def event_gen():
@@ -367,12 +433,10 @@ async def research_resume(run_id: str, body: ResumeRequest | None = None) -> Str
             logger.exception("research.resume_failed", run_id=run_id)
             emitter.last_status = "error"
             code, recoverable = failure_event_code(exc)
-            yield emitter.error(
-                "api",
-                code if code != "internal_error" else "resume_failed",
-                str(exc)[:300],
-                recoverable=recoverable,
-            ).to_sse()
+            # 这里刻意**不**把状态写成 failed：run 仍停在检查点可续跑的位置，
+            # 保持 `awaiting_input` 才能让用户稍后从断点重试（与门禁取值自洽）。
+            code = code if code != "internal_error" else "resume_failed"
+            yield emitter.error("api", code, failure_event_message(code), recoverable=recoverable).to_sse()
             yield emitter.done(status="error").to_sse()
         finally:
             await emitter.flush_token_usage()
