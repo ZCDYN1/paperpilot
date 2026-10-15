@@ -600,7 +600,7 @@ RRF 只用**排名**：`Σ 1/(k + rank)`，量纲问题被彻底绕过，且对�
 | GET | `/api/v1/research/{run_id}/export.md` | 导出 Markdown 报告（F8，含对比表与参考文献） | ✅ |
 | GET | `/api/v1/research/{run_id}/related-work.md` | 「相关工作」章节草稿，按方法分组（F18） | ✅ |
 | GET | `/api/v1/research/{run_id}/timeline` | 方法演进时间线（F12；无引用边时 `addresses_gap` 恒空） | ✅ |
-| POST | `/api/v1/research/{run_id}/followup` | 基于本次已校验证据追问，**不重新检索**（F9） | ✅ |
+| POST | `/api/v1/research/{run_id}/followup` | 基于本次已校验证据追问，**不重新检索**（F9）；同时带上本会话历史以消解"第二种方法"这类序数指代，见 §9 | ✅ |
 | GET | `/api/v1/papers/{arxiv_id}` | 单篇详情：元数据 + 章节级 chunk + 历史引用（F13） | ✅ |
 | POST | `/api/v1/papers/{arxiv_id}/ask` | 只在该篇内容上问答（F13） | ✅ |
 | POST | `/api/v1/papers/upload` | 上传 PDF / TXT / MD 入库（F15；PDF 解析器是可选 extra） | ✅ |
