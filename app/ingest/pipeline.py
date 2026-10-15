@@ -40,7 +40,7 @@ from app.ingest.arxiv_client import ArxivClient, ArxivPaper
 from app.ingest.html_extractor import fetch_sections
 from app.ingest.openalex_client import OpenAlexClient, OpenAlexMetrics
 from app.retrieval.chunking import Chunk, chunk_paper, chunks_from_abstract
-from app.retrieval.hybrid_retriever import ChunkRecord
+from app.retrieval.hybrid_retriever import CODE_REPO_HOSTS, ChunkRecord
 
 logger = structlog.get_logger(__name__)
 
@@ -76,12 +76,16 @@ def extract_venue(comment: str | None) -> str | None:
 
 # 「是否有代码」（F2 第三类过滤）只从 arXiv 官方元数据判定（ADR D7：文本字段只采信
 # arXiv 官方；D9 同款思路——comment/abstract 是作者自填、arXiv 托管的自由文本）。
-# 只认真正"指向仓库/模型页"的链接：域名后必须跟 `/路径`，裸域名（如行文里的
-# "GitHub.com 是托管平台"）不算 —— 误判成 True 会被过滤当成真阳性，比漏判更坑。
+# 域名清单引用 `hybrid_retriever.CODE_REPO_HOSTS`（单一事实源，与 comparator 的
+# code_url 抽取共用；此前两边各写一份清单，codeberg.org 只进了一边就开始漂移）。
+# 这里保留更严格的判定口径：**域名后必须跟 `/路径`** —— 裸域名（如行文里的
+# "GitHub.com 是托管平台"）不算仓库链接，误判成 True 会被"仅有代码"过滤当成真阳性，
+# 比漏判更坑。与 comparator 的唯一差异是检测侧不要求 `https?://` 前缀：comment 里
+# 作者常裸写 "gitlab.com/a/b"（既有测试钉住这一形态），命中的域名仍走同一份清单。
 # 识别不到返回 None 而不是 False：元数据里没有链接 ≠ 论文没有代码，不许编造；
 # "未见链接"这一保守口径由检索侧 `_prefilter` 负责解释（见 MetadataFilter.has_code）。
 _CODE_URL_RE = re.compile(
-    r"(?:github|gitlab)\.com/|huggingface\.co/|bitbucket\.org/",
+    rf"(?:{CODE_REPO_HOSTS})/",
     re.I,  # comment 里链接大小写混用（GitHub/GITHUB）
 )
 

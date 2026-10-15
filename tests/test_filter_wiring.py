@@ -17,13 +17,19 @@ import numpy as np
 import pytest
 from pydantic import ValidationError
 
-from app.agents.nodes import retriever_worker
+from app.agents.nodes import comparator, retriever_worker
 from app.agents.nodes.ensure_corpus import collect_categories, collect_ingest_params
 from app.agents.nodes.retriever_worker import _build_args, _build_extra_filters, retrieve_node
 from app.agents.tools.hybrid_search import build_filter
 from app.ingest.arxiv_client import ArxivPaper
+from app.ingest.pipeline import _CODE_URL_RE as _DETECT_CODE_RE
 from app.ingest.pipeline import _paper_row, detect_has_code
-from app.retrieval.hybrid_retriever import HybridRetriever, MetadataFilter, corpus_digest
+from app.retrieval.hybrid_retriever import (
+    CODE_REPO_HOSTS,
+    HybridRetriever,
+    MetadataFilter,
+    corpus_digest,
+)
 from app.schemas.research import ResearchFilters, ResearchRequest
 from app.schemas.retrieval import HybridSearchArgs
 from tests.conftest import BROAD_KEYWORDS, FOCUSED_QUERY, PAPER_A, PAPER_B, PAPER_C, make_corpus
@@ -52,13 +58,17 @@ async def code_retriever(tmp_path) -> HybridRetriever:
 
 # ------------------------------------------------------------------ T1 抓取侧
 def test_detect_has_code_positive_cases():
-    """四大仓库/模型托管域，出现在 comment 或 abstract 任一处都算真阳性。"""
+    """清单内（CODE_REPO_HOSTS）的仓库/模型托管域，出现在 comment 或 abstract 任一处都算真阳性。"""
     assert detect_has_code("Code: https://github.com/foo/bar", None) is True
     assert detect_has_code(None, "model at https://huggingface.co/org/model") is True
     assert detect_has_code("repo: gitlab.com/a/b", None) is True
     assert detect_has_code(None, "see https://bitbucket.org/x/y") is True
     # 大小写混用是 comment 常态
     assert detect_has_code("GitHub.com/Foo/Bar released", None) is True
+    # codeberg 回归锁：域名曾只写在 comparator 那份清单里，入库侧漏判 →
+    # "仅有代码"过滤把对比表认定为开源的论文筛掉。现在两处共用单一事实源。
+    assert detect_has_code("repo: https://codeberg.org/foo/bar", None) is True
+    assert detect_has_code(None, "Codeberg.org/foo/bar 有实现") is True
 
 
 def test_detect_has_code_negative_stays_none_not_false():
@@ -68,8 +78,29 @@ def test_detect_has_code_negative_stays_none_not_false():
     assert detect_has_code("", "") is None
     # 裸域名行文不是仓库链接：没有 `/路径`，误判成真阳性比漏判更坑
     assert detect_has_code("GitHub.com is a hosting platform", None) is None
-    # 只认四个域，其它外链（项目主页、docs）不算
+    # 保守口径没被 codeberg 的加入放宽：裸写的 Codeberg.org 同样不算
+    assert detect_has_code("Codeberg.org is a federated platform", None) is None
+    # 只认清单内的域，其它外链（项目主页、docs）不算
     assert detect_has_code("demo at https://project.example.org/code", None) is None
+
+
+def test_code_repo_hosts_single_source_of_truth():
+    """域名清单必须是**一份**，两处正则都从 `CODE_REPO_HOSTS` 生成。
+
+    防的是原 bug 复发：清单各写各的 → 有人再往一边加域名就再次漂移，而这类漂移
+    没有报错、只有"过滤结果和对比表互相矛盾"。逐子串比对 pattern 比逐域名断言更狠：
+    任何人把域名硬编码回某一份正则，共享片段就对不上了。
+    """
+    assert CODE_REPO_HOSTS in _DETECT_CODE_RE.pattern
+    assert CODE_REPO_HOSTS in comparator._CODE_URL_RE.pattern
+    # 行为一致性：清单内每个域名，两侧都必须"域名+/路径"才认（合并时保留的严格口径）
+    for host in CODE_REPO_HOSTS.replace("\\.", ".").split("|"):
+        assert detect_has_code(f"code at https://{host}/org/repo", None) is True
+        assert detect_has_code(f"{host.capitalize()} 是个平台", None) is None
+        assert comparator._extract_code_url(f"see https://{host}/a/b for code") == (
+            f"https://{host}/a/b"
+        )
+        assert comparator._extract_code_url(f"https://{host}") == ""
 
 
 def test_paper_row_fills_has_code_from_arxiv_metadata():

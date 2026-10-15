@@ -61,6 +61,7 @@ from app.agents.schemas import ComparisonRow, ComparisonTable
 from app.agents.state import ResearchState
 from app.agents.tools.paper_meta import run_get_paper_detail
 from app.core.config import get_settings
+from app.retrieval.hybrid_retriever import CODE_REPO_HOSTS
 
 logger = structlog.get_logger(__name__)
 
@@ -114,12 +115,15 @@ _ALPHA_ANCHOR_RE = re.compile(r"[A-Za-z][A-Za-z0-9]{2,}")
 # 编造的字段值里只要混入一个原文没有的专名（数据集/指标），比例就掉到 0.5 以下。
 _GROUND_MIN_RATIO = 0.5
 
-# 代码仓库链接。只认这些"代码托管"域名 —— 泛化的 URL 抽取会把参考文献链接、
-# 图片链接、arXiv 自身链接都卷进来，那些不是"代码链接"。
+# 代码仓库链接。域名清单引用 `hybrid_retriever.CODE_REPO_HOSTS`（单一事实源，与入库侧
+# `pipeline.detect_has_code` 共用；此前两份清单各写各的，codeberg.org 只进了这一边，
+# 导致"对比表认它开源、has_code 过滤却漏掉它"）。
+# ⚠️ 本正则要求域名后必须跟 `/非空路径`（保守口径，与入库侧一致）：裸域名不算；
+# 与入库侧的唯一差异是抽取必须带 `https?://` 前缀，因为它要产出**完整可用的 URL 字符串**。
+# 只认清单内域名 —— 泛化的 URL 抽取会把参考文献链接、图片链接、arXiv 自身链接都卷进来，
+# 那些不是"代码链接"。
 _CODE_URL_RE = re.compile(
-    r"https?://(?:www\.)?"
-    r"(?:github\.com|gitlab\.com|bitbucket\.org|huggingface\.co|codeberg\.org)"
-    r"/[^\s)\]}>\"',;]+",
+    rf"https?://(?:www\.)?(?:{CODE_REPO_HOSTS})/[^\s)\]}}>\"',;]+",
     re.I,
 )
 

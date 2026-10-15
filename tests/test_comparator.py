@@ -322,6 +322,17 @@ def test_extract_code_url_strips_trailing_punctuation():
     assert comparator._extract_code_url("no link here") == ""
 
 
+def test_extract_code_url_accepts_codeberg_but_bare_domain_not():
+    """域名清单与入库侧共用单一事实源（CODE_REPO_HOSTS），codeberg 必须在列；
+    同时保守口径不许放宽：域名后没有 `/路径` 的一律不抽（裸域名 ≠ 仓库链接）。"""
+    assert (
+        comparator._extract_code_url("Our code lives at https://codeberg.org/foo/bar.")
+        == "https://codeberg.org/foo/bar"
+    )
+    assert comparator._extract_code_url("Codeberg.org 是个托管平台") == ""
+    assert comparator._extract_code_url("see https://codeberg.org for more") == ""
+
+
 # ---------------------------------------------------------------------------
 # 7) 边界：没有论文 / LLM 失败
 # ---------------------------------------------------------------------------

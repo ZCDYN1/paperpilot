@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from pathlib import Path
 
 from app.retrieval.hybrid_retriever import ChunkRecord, HybridRetriever
@@ -109,3 +111,51 @@ async def test_chunk_record_defaults_are_conservative():
     rec = ChunkRecord(chunk_id=1, arxiv_id="x", section="abstract", text="t")
     assert rec.source == "abstract"
     assert rec.chunk_type == "text"
+
+
+async def test_faiss_and_bm25_search_run_off_the_event_loop(retriever):
+    """faiss(C++) / rank_bm25(纯 Python) 是同步 CPU 密集调用，必须经 `asyncio.to_thread`
+    离开事件循环线程 —— 并发请求下否则会卡死整个服务。
+
+    证明方式不靠 sleep 猜时序：假 store 的 search 阻塞在 `threading.Event` 上，
+    而这个事件只能由**事件循环上的协程**置位。
+    - 若 search 仍跑在循环线程：循环被同步调用冻结，置位协程永远得不到执行，
+      `Event.wait` 超时 → 断言失败；
+    - 若 search 已进线程池：循环照常调度置位协程，毫秒级通过。
+    """
+    loop_ident = threading.get_ident()
+    release = threading.Event()
+    worker_idents: list[int] = []
+
+    class _GateStore:
+        """包住真 store：先自证"我在哪个线程、有没有把循环卡死"，再委托原实现。"""
+
+        def __init__(self, inner) -> None:
+            self._inner = inner
+
+        def search(self, *args, **kwargs):
+            worker_idents.append(threading.get_ident())
+            if not release.wait(timeout=5.0):
+                raise AssertionError("事件循环被阻塞：置位协程没机会运行（检索没被丢到线程）")
+            return self._inner.search(*args, **kwargs)
+
+    retriever.faiss = _GateStore(retriever.faiss)
+    retriever.bm25 = _GateStore(retriever.bm25)
+
+    task = asyncio.create_task(retriever.search(FOCUSED_QUERY, FOCUSED_KEYWORDS, top_k=10))
+    # 轮询等两路检索真正进入工作线程（不猜固定时长）；循环在 sleep 间正常调度，
+    # 若假 store 跑在循环线程上，这里会一直空转直到 _GateStore 的 5s 超时先报错。
+    while not worker_idents:
+        await asyncio.sleep(0.01)
+    assert not task.done(), "闸门还没放行，检索不应完成"
+
+    release.set()
+    hits = await asyncio.wait_for(task, timeout=5.0)
+
+    # 两路都被线程化：各留下一条"不在事件循环线程上"的执行记录
+    assert len(worker_idents) == 2
+    assert all(ident != loop_ident for ident in worker_idents)
+    # 线程化不能改变结果语义：双路照常参与融合，排序与既有用例一致
+    assert hits and hits[0].arxiv_id == PAPER_A
+    assert {PAPER_A, PAPER_B, PAPER_C} == {h.arxiv_id for h in hits}
+    assert "vector" in hits[0].matched_by and "bm25" in hits[0].matched_by

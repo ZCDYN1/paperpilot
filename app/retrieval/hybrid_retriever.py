@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections import defaultdict
@@ -38,6 +39,16 @@ from app.retrieval.fusion import rrf_fuse, weighted_fuse
 from app.retrieval.reranker import BaseReranker, get_reranker
 
 logger = structlog.get_logger(__name__)
+
+
+# 「开源代码仓库」域名清单 —— **单一事实源**（正则片段，转义后的点号，用 | 连接）。
+# 消费方有两处：入库侧 `pipeline.detect_has_code`（has_code 判定）与对比表
+# `comparator._CODE_URL_RE`（code_url 抽取）。历史上这两份清单各写各的，已经漂移过一次：
+# codeberg.org 只在 comparator 一份里 —— 只有 codeberg 仓库的论文在对比表里被当成开源，
+# 却被"仅有代码"过滤漏掉（同一个事实位给出两个答案）。今后新增托管域只改这一行。
+# 两处消费都保留「域名后必须跟 `/路径`」的保守口径：裸域名（行文里的 "GitHub.com 是托管平台"）
+# 不算仓库链接 —— 误判成真的比漏判更坑（会把无代码的论文放进"仅有代码"结果集）。
+CODE_REPO_HOSTS = r"github\.com|gitlab\.com|bitbucket\.org|huggingface\.co|codeberg\.org"
 
 
 @dataclass(slots=True)
@@ -318,13 +329,22 @@ class HybridRetriever:
             return []
 
         # 2) 双路召回（按配置裁剪；关掉的那一路连 encode 都不做，省时也免去依赖）
+        # ⚠️ faiss 的 C++ 检索与 rank_bm25 的纯 Python 打分都是 CPU 密集且**同步**的：
+        # 在 async 路径里裸调会卡死事件循环（并发请求全部排队）。embedder/reranker
+        # 早已 `asyncio.to_thread`，这两路是漏网的。两路仍按原顺序串行执行 ——
+        # `_fuse` 对 vec/sparse 两个入参是有位置的（vector 在前），不做并行化改造，
+        # 线程化只解决"阻塞循环"，不触碰任何召回/排序语义。
         vec_hits: list[tuple[int, float]] = []
         sparse_hits: list[tuple[int, float]] = []
         if cfg.use_vector:
             query_vec = (await self.embedder.encode([query]))[0]
-            vec_hits = self.faiss.search(query_vec, top_k, allow_ids=allow_ids)
+            vec_hits = await asyncio.to_thread(
+                self.faiss.search, query_vec, top_k, allow_ids=allow_ids
+            )
         if cfg.use_bm25:
-            sparse_hits = self.bm25.search(keywords or query, top_k, allow_ids=allow_ids)
+            sparse_hits = await asyncio.to_thread(
+                self.bm25.search, keywords or query, top_k, allow_ids=allow_ids
+            )
 
         matched: dict[int, set[str]] = defaultdict(set)
         for cid, _ in vec_hits:
