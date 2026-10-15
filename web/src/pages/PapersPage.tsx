@@ -5,6 +5,7 @@ import { COMPARISON_COLUMNS } from "@/api/domain";
 import type { AskResult, BuildEdgesResult, Citation, ComparisonRow, PaperDetail } from "@/api/domain";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Panel } from "@/components/ui/Panel";
+import { Pager } from "@/components/ui/Pager";
 import { Tag } from "@/components/ui/Tag";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -254,13 +255,31 @@ export function toDetailIssue(e: unknown, arxivId: string): DetailIssue {
 
 type ListState = "loading" | "ready" | "error";
 
+/**
+ * 论文列表每页几条。
+ *
+ * 定这个数不是为了"看起来清爽"，而是为了**和右栏对齐**：右栏（单篇深挖 + 定向对比）
+ * 正常高度在 600~800px，左栏 32 条一次铺开是 2500px 以上，于是右栏下面出现一大片空白，
+ * 而且滚轮滚到列表里就再也滚不动页面。8 条 ≈ 640px，两栏基本同高。
+ */
+const PAPERS_PAGE_SIZE = 8;
+
 export function PapersPage() {
   const [papers, setPapers] = useState<PaperDetail[]>([]);
   const [total, setTotal] = useState(0);
   const [listState, setListState] = useState<ListState>("loading");
   const [listError, setListError] = useState("");
+  const [listPage, setListPage] = useState(1);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const listPages = Math.max(1, Math.ceil(papers.length / PAPERS_PAGE_SIZE));
+  const safeListPage = Math.min(Math.max(listPage, 1), listPages);
+  const pagePapers = papers.slice((safeListPage - 1) * PAPERS_PAGE_SIZE, safeListPage * PAPERS_PAGE_SIZE);
+  // 列表内容换了（搜索、筛选、重新加载、刚入库一篇）就把页码带回第一页：
+  // 停在第 4 页看一份只剩 6 条的结果集，界面会显示成"什么都没有"
+  useEffect(() => {
+    setListPage(1);
+  }, [papers]);
   const [detail, setDetail] = useState<PaperDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailIssue, setDetailIssue] = useState<DetailIssue | null>(null);
@@ -503,12 +522,12 @@ export function PapersPage() {
         }
       />
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)]">
+      <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)]">
         {/* 左：列表 + 上传 */}
         <div className="flex min-w-0 flex-col gap-4">
           <Panel
             title="论文列表"
-            subtitle={`共 ${total} 篇 · 本页 ${papers.length} 篇 · 勾选 2~3 篇可定向对比`}
+            subtitle={`共 ${total} 篇 · 第 ${safeListPage}/${listPages} 页 · 本页 ${pagePapers.length} 篇 · 勾选 2~3 篇可定向对比`}
             extra={
               <div className="flex items-center gap-2">
                 {compareIds.length >= 2 ? (
@@ -549,8 +568,9 @@ export function PapersPage() {
             ) : papers.length === 0 ? (
               <EmptyState title="库里还没有论文" description="上传一篇 PDF，或先跑一次研究把论文收进来。" />
             ) : (
+              <>
               <ul className="flex flex-col gap-2">
-                {papers.map((p) => {
+                {pagePapers.map((p) => {
                   const active = p.arxiv_id === selectedId;
                   const tier = p.venue_tier?.tier;
                   return (
@@ -605,6 +625,14 @@ export function PapersPage() {
                   );
                 })}
               </ul>
+              <Pager
+                page={safeListPage}
+                pages={listPages}
+                onChange={setListPage}
+                ariaLabel="论文列表分页"
+                className="mt-3 border-t border-hairline pt-3"
+              />
+              </>
             )}
             {(refsBuilding || refsResult || refsError) && (
               <div className="mt-3 flex flex-col gap-2 rounded-lg border border-hairline bg-white/[0.03] px-3 py-2.5">
@@ -629,7 +657,9 @@ export function PapersPage() {
                       <li>单篇抓取失败 {refsResult.errors} 篇</li>
                     </ul>
                     <p className="text-[11px] leading-relaxed text-ink-faint">
-                      {refsResult.requested < total ? `本批只覆盖了当前页的 ${refsResult.requested} 篇（语料共 ${total} 篇），翻页后可再跑一批。` : ""}
+                      {refsResult.requested < total
+                      ? `本批只抓了已载入的 ${refsResult.requested} 篇（语料共 ${total} 篇）—— 界面一次只从接口取 50 篇，剩下的要等载入后再跑一批，和下面的分页条无关。`
+                      : ""}
                       诚实提示：works_found 远小于 requested 多半是因为 OpenAlex
                       <b>还没收录这么新的 arXiv 论文</b>，不是抓取失败。抓回来的边是 F12 时间线
                       addresses_gap（&quot;谁补了谁的坑&quot;）的唯一数据来源 —— 不跑这一步，时间线永远没有引用证据。
@@ -703,7 +733,9 @@ export function PapersPage() {
         </div>
 
         {/* 右：单篇深挖 (F13) + 定向对比 (F14) */}
-        <div className="flex min-w-0 flex-col gap-4">
+        {/* sticky：左栏列表比右栏高时，右栏跟着滚到视口顶就停住 ——
+            否则读完一篇想追问，得先滚回一大片空白下面找那个面板 */}
+        <div className="flex min-w-0 flex-col gap-4 lg:sticky lg:top-4">
           <Panel title="单篇深挖 (F13)" subtitle={selectedPaper ? selectedPaper.title : "从左侧选择一篇论文"}>
             {!selectedId ? (
               <EmptyState icon="file-search" title="未选择论文" description="点击左侧任一篇论文，查看摘要并就该篇追问。" />

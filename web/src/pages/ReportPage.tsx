@@ -7,6 +7,7 @@ import { useSelectedRunId } from "@/hooks/useSelectedRunId";
 import { palette } from "@/config/theme";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Panel } from "@/components/ui/Panel";
+import { Pager } from "@/components/ui/Pager";
 import { StatCard } from "@/components/ui/StatCard";
 import { Stagger } from "@/components/ui/Stagger";
 import { Segmented } from "@/components/ui/Segmented";
@@ -102,6 +103,49 @@ const T: Record<Lang, Record<string, string>> = {
   },
 };
 
+/**
+ * 把报告按 `## ` 小节切成分页用的段落。
+ *
+ * 为什么按小节而不是按固定行数：这份正文是 `app/export/markdown.py` 的模板产出的，
+ * 结构稳定（`## 总体概览` / `## 一、…` / `## 参考文献` / `## 成本与耗时`），
+ * 按小节切每一页都是一个完整语义单元；按行数切会把一段论证拦腰截断，
+ * 而"引用角标 [n] 在正文里、它的证据在右栏"这种跨栏对应关系最怕截断。
+ *
+ * 第一个 `## ` 之前的内容（报告大标题 + 引言）单独算一页，不丢。
+ */
+export function splitReportSections(markdown: string): { title: string; body: string }[] {
+  const text = (markdown || "").trim();
+  if (!text) return [];
+
+  const sections: { title: string; body: string }[] = [];
+  let current: { title: string; lines: string[] } | null = null;
+
+  for (const line of text.split("\n")) {
+    const heading = /^##\s+(.+?)\s*$/.exec(line);
+    if (heading) {
+      if (current) sections.push({ title: current.title, body: current.lines.join("\n") });
+      current = { title: heading[1], lines: [line] };
+    } else if (current) {
+      current.lines.push(line);
+    } else {
+      // 还没有遇到任何 `## `：这些行属于开头（大标题 / 引言）
+      current = { title: "", lines: [line] };
+    }
+  }
+  if (current) sections.push({ title: current.title, body: current.lines.join("\n") });
+
+  return sections.map((s, i) => ({
+    title: s.title || (i === 0 ? "开头" : "未命名小节"),
+    body: s.body,
+  }));
+}
+
+/** 导航条上的小节名：太长会挤成一团，截断即可（完整标题在正文里看得到） */
+function shortLabel(title: string, limit = 12): string {
+  const clean = title.replace(/[⚠️→·]/g, " ").replace(/\s+/g, " ").trim();
+  return clean.length > limit ? `${clean.slice(0, limit)}…` : clean;
+}
+
 export function ReportPage() {
   const { runId } = useSelectedRunId();
 
@@ -112,6 +156,10 @@ export function ReportPage() {
   const [lang, setLang] = useState<Lang>("zh");
   const [paperFilter, setPaperFilter] = useState("all");
   const [activeCite, setActiveCite] = useState<number | null>(null);
+  // 正文分页：一次研究的报告实测能到 5000px 高，而右栏证据链只有 ~700px，
+  // 两栏完全对不齐；而且长内容内层滚动 + 页面滚动套在一起会"抢滚轮"。
+  const [sectionPage, setSectionPage] = useState(1);
+  const [readWhole, setReadWhole] = useState(false);
 
   const t = T[lang];
 
@@ -120,6 +168,10 @@ export function ReportPage() {
     let alive = true;
     setLoading(true);
     setError(null);
+    // 换一条 run 就是把另一篇报告放进来了，分页位置必须回到第一页 ——
+    // 停在第 4 页会让用户以为新报告"只有三节"。
+    setSectionPage(1);
+    setReadWhole(false);
     Promise.all([api.research.getRun(runId), api.research.getCitations(runId)])
       .then(([r, c]) => {
         if (!alive) return;
@@ -137,6 +189,10 @@ export function ReportPage() {
   }, [runId]);
 
   const citations = bundle?.citations ?? [];
+
+  const sections = useMemo(() => splitReportSections(run?.draft ?? ""), [run?.draft]);
+  const pageCount = sections.length;
+  const safePage = Math.min(Math.max(sectionPage, 1), Math.max(pageCount, 1));
 
   const papers = useMemo(
     () => Array.from(new Set(citations.map((c) => c.arxiv_id).filter(Boolean))),
@@ -284,8 +340,27 @@ export function ReportPage() {
         )}
       </Panel>
 
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,1fr)]">
-        <Panel title={t.report} subtitle={t.reportSub}>
+      {/* 两栏严格等高：正文分页之后每一栏都是有限高度，
+          不再出现"左边 5000px、右边 700px"那种一边倒 */}
+      <div className="grid grid-cols-1 items-stretch gap-4 xl:h-[760px] xl:grid-cols-[minmax(0,1.05fr)_minmax(0,1fr)]">
+        <Panel
+          title={t.report}
+          subtitle={t.reportSub}
+          className="min-h-0 xl:h-full"
+          bodyClassName="flex min-h-0 flex-col gap-3 overflow-hidden"
+          extra={
+            pageCount > 1 ? (
+              <button
+                type="button"
+                onClick={() => setReadWhole((v) => !v)}
+                title={readWhole ? "改回按小节翻页" : "一次性看完整篇（方便 Ctrl+F 全文查找）"}
+                className="rounded-lg border border-hairline px-2.5 py-1 text-[11px] text-ink-soft transition hover:border-neon-cyan/50 hover:text-neon-cyan"
+              >
+                {readWhole ? "按小节翻页" : "看完整篇"}
+              </button>
+            ) : null
+          }
+        >
           {loading ? (
             <div className="flex flex-col gap-3">
               <Skeleton height={22} width="55%" />
@@ -294,14 +369,34 @@ export function ReportPage() {
               <Skeleton height={120} />
             </div>
           ) : (
-            <MarkdownBlock source={run?.draft ?? ""} onCiteClick={jumpToCitation} />
+            <>
+              <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+                <MarkdownBlock
+                  source={readWhole ? (run?.draft ?? "") : (sections[safePage - 1]?.body ?? "")}
+                  onCiteClick={jumpToCitation}
+                />
+              </div>
+              {/* 「看完整篇」时不再摆分页条：那时正文是一整篇，翻页控件点了也没意义 */}
+              {!readWhole && pageCount > 1 ? (
+                <Pager
+                  page={safePage}
+                  pages={pageCount}
+                  onChange={setSectionPage}
+                  labels={sections.map((s) => shortLabel(s.title))}
+                  unit="节"
+                  ariaLabel="报告小节导航"
+                  className="shrink-0 border-t border-hairline pt-3"
+                />
+              ) : null}
+            </>
           )}
         </Panel>
 
         <Panel
           title={t.evidence}
           subtitle={t.evidenceSub}
-          bodyClassName="max-h-[640px] overflow-y-auto"
+          className="min-h-0 xl:h-full"
+          bodyClassName="min-h-0 flex-1 overflow-y-auto"
           extra={
             <label className="flex items-center gap-2 text-[11px] text-ink-soft">
               <span className="hidden sm:inline">{t.filterPaper}</span>
