@@ -28,6 +28,7 @@ from sqlalchemy import select
 from app.agents.nodes._common import text_invoke
 from app.db.models import Citation, Paper, ResearchRun
 from app.db.session import session_scope
+from app.memory.short_term import recall_history, render_history_block
 
 logger = structlog.get_logger(__name__)
 
@@ -95,6 +96,11 @@ def _ungrounded_sentences(answer: str, known_indexes: set[int]) -> list[str]:
 async def answer_from_read_papers(run_id: str, question: str) -> dict[str, Any]:
     """在**这次研究已经读过并校验过的内容**上回答追问。不检索、不联网、不建索引。
 
+    追问带着本会话的历史（短期记忆）一起进 prompt：`load_context` 那份问答流水里
+    有上一轮的提问与最终报告，"第二种方法的代价是什么"这类指代要靠它才能落到
+    用户真正看过的那个顺序上 —— 只看证据清单的话，编号顺序是代码定的，和用户读到的
+    叙述顺序不是一回事。
+
     Raises:
         RunNotFoundError: run 不存在（路由映射 404）。
     """
@@ -102,6 +108,7 @@ async def answer_from_read_papers(run_id: str, question: str) -> dict[str, Any]:
         run = await session.get(ResearchRun, run_id)
         if run is None:
             raise RunNotFoundError(run_id)
+        session_id = run.session_id
         rows = list(
             (
                 await session.execute(
@@ -150,16 +157,22 @@ async def answer_from_read_papers(run_id: str, question: str) -> dict[str, Any]:
 
     evidence, used = _evidence_block(usable, titles)
     known = {item["index"] for item in used}
+    # 会话历史与 `plan` 用的是同一份读取/渲染（`short_term.recall_history`），
+    # 追问因此能接住"第二种方法/上一篇里那个结论"这类指代。
+    history_block = render_history_block(await recall_history(session_id))
     messages = [
         SystemMessage(
             content=(
                 "你是文献问答助手。只允许使用下面给出的证据回答，"
                 "每一条依据都必须在句尾用对应的 [n] 标记指出。"
                 "证据里没有的内容一律不要写进去 —— "
-                "如果证据不足以回答，就直接说明不足，不要用你自己的知识补全。"
+                "如果证据不足以回答，就直接说明不足，不要用你自己的知识补全。\n"
+                "⚠️ [n] 只对**本轮列出的这批证据**有效：会话历史里上一轮报告也带编号，"
+                "那是另一个集合，照抄过来会指向完全不同的论文。"
+                "历史只用来理解用户指的是什么，不要当引用来源。"
             )
         ),
-        HumanMessage(content=f"证据：\n{evidence}\n\n问题：{question}"),
+        HumanMessage(content=f"{history_block}证据：\n{evidence}\n\n问题：{question}"),
     ]
     try:
         body, usage = await text_invoke(messages)
