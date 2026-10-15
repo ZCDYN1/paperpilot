@@ -257,18 +257,38 @@ async def plan_node(state: ResearchState) -> dict:
         ),
     ]
     parsed, usage = await structured_invoke(PlanOutput, messages)
+    degraded = parsed is None
+    if degraded:
+        # `include_raw=True` 下"模型输出不合规"**不抛异常**，只把 `parsed` 置成 None。
+        # 必须在这里就当失败处理：否则下一行 `parsed.sub_questions` 抛 AttributeError，
+        # 把一个本可降级的事件变成整次研究 500（reader 已按同一口径处置）。
+        #
+        # 只降级这一种情况。**传输层异常照原样上抛**（超时/熔断/连不上）：那是
+        # 容错层的产物 —— 它要给流里送 `internal_error` / `llm_circuit_open`，
+        # 让用户看到"下游挂了、稍后重试有意义"。在这里一并接住的话，
+        # 用户会拿到一份"模型根本没跑起来"的报告，而熔断器明明告诉他现在别试。
+        logger.warning("planner.degraded", reason="structured_output_unparsed")
+        rationale = "模型未产出合规拆解，已降级为「原问题单路检索」。"
+        # 兜底走 `_salvage` 而不是自己拼关键词：补位规则（只留英文词、空则用 "retrieval"）
+        # 只该有一份定义，两处各写一遍迟早会漂移。
+        sub_questions = _salvage(
+            [{"id": "sq-1", "text": question, "keywords": [], "category": None}], question
+        )
+    else:
+        rationale = str(parsed.rationale or "")
+        sub_questions = _salvage([sq.model_dump() for sq in parsed.sub_questions], question)
 
-    sub_questions = _salvage([sq.model_dump() for sq in parsed.sub_questions], question)
     logger.info(
         "planner.done",
         count=len(sub_questions),
         memories=len(memories),
         history=len(history),
+        degraded=degraded,
     )
 
     return {
         "sub_questions": sub_questions,
-        "plan_rationale": parsed.rationale,
+        "plan_rationale": rationale,
         # 把召回结果透出到 state：finalize 可据此判断"记忆确实被用上了"，
         # 也让 SSE/评测能观测到"这一轮参考了哪些历史"。
         "memory_context": memories,
@@ -281,7 +301,7 @@ async def plan_node(state: ResearchState) -> dict:
             node_event(
                 "plan_created",
                 sub_questions=sub_questions,
-                rationale=parsed.rationale,
+                rationale=rationale,
                 count=len(sub_questions),
                 memory_count=len(memories),  # 让前端能显示"参考了 N 条历史记忆"
                 # F9 的观测位：本轮带进了几段会话上下文（0 = 首轮提问，或短期记忆降级）。
@@ -289,7 +309,22 @@ async def plan_node(state: ResearchState) -> dict:
                 # 事件协议是对外契约，加字段容易、加类型要前端同步改分支。
                 history_count=len(history),
             )
-        ],
+        ]
+        + (
+            # 降级必须显式出现在流里：只改 `plan_rationale` 的文案，用户在界面上
+            # 看到的是"拆解只有 1 个子问题"，分不清模型保守还是拆解坏了。
+            [
+                node_event(
+                    "error",
+                    node="plan",
+                    code="plan_degraded",
+                    message=rationale,
+                    recoverable=True,
+                )
+            ]
+            if degraded
+            else []
+        ),
     }
 
 

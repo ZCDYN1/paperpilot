@@ -302,8 +302,24 @@ async def test_build_ragas_dataset_prefers_live_state(scope, tmp_path):
 
 
 # =========================================================================== 3. 降级路径
+def _pretend_ragas_installed(monkeypatch) -> None:
+    """放行"没装 ragas"这道闸门，好测它**之后**的降级分支。
+
+    下面三条测的是"裁判模型不可用 / 库里没有 run"，与 ragas 本身无关。
+    若不加这层打桩，只有装了 `[eval]` 可选依赖的机器才能测到它们 ——
+    而按 README 只装 `pip install -e ".[dev]"` 的人（包括 CI）会得到
+    `reason='ragas 未安装'`，断言"提到 mock/LLM"当场红。
+    "闸门自己放行"这一分支由 `test_..._ragas_missing` 单独守，判据不重叠。
+    """
+    from app.eval import ragas_runner
+
+    # 返回值在这三条路径里根本不会被用到（都提前 return 了），给个空壳即可。
+    monkeypatch.setattr(ragas_runner, "_load_ragas", lambda: SimpleNamespace())
+
+
 async def test_run_ragas_eval_missing_run_returns_empty_report(scope, monkeypatch):
     """DB 里没有对应 run → 返回空报告（available=False + 说明），而不是 KeyError。"""
+    _pretend_ragas_installed(monkeypatch)
     # 先把裁判模型配成"可用"，确保走到的是"没有 run"这一分支而不是"没配 key"分支
     monkeypatch.setenv("LLM_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
@@ -320,6 +336,7 @@ async def test_run_ragas_eval_missing_run_returns_empty_report(scope, monkeypatc
 
 async def test_run_ragas_eval_mock_returns_unavailable(monkeypatch):
     """LLM_PROVIDER=mock → available=False、有 reason、列出被跳过的指标。"""
+    _pretend_ragas_installed(monkeypatch)
     monkeypatch.setenv("LLM_PROVIDER", "mock")
     get_settings.cache_clear()
 
@@ -332,6 +349,7 @@ async def test_run_ragas_eval_mock_returns_unavailable(monkeypatch):
 
 async def test_run_ragas_eval_unconfigured_key_returns_unavailable(monkeypatch):
     """provider=openai 但没配 key → 同样降级（不能拿"连不上"当"算出分"）。"""
+    _pretend_ragas_installed(monkeypatch)
     monkeypatch.setenv("LLM_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_API_KEY", "")
     get_settings.cache_clear()
