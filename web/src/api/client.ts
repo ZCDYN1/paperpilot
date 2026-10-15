@@ -81,11 +81,31 @@ async function requestJson<T>(path: string, method: string, body: unknown): Prom
 async function readDetail(resp: Response): Promise<string> {
   try {
     const json = (await resp.json()) as { detail?: unknown };
-    const d = json?.detail;
-    return typeof d === "string" ? d : JSON.stringify(d ?? resp.statusText);
+    return detailToText(json?.detail, resp.statusText);
   } catch {
     return resp.statusText;
   }
+}
+
+/**
+ * 把后端的 `detail` 收成一句人话。
+ *
+ * 404/409 这类结构化错误现在是 `{code, reason, hint}`（见 `app/api/v1/research.py`
+ * 的 resume 门禁与 `app/api/v1/papers.py`）。直接 `JSON.stringify` 会把
+ * `{"code":"not_resumable","status":"completed"}` 原样糊在红条上 —— 用户读到的是
+ * 序列化残骸而不是"这次为什么不行"。`reason` 本身就是给人看的中文，优先用它。
+ */
+function detailToText(detail: unknown, statusText: string): string {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) return JSON.stringify(detail);
+  if (detail && typeof detail === "object") {
+    const d = detail as Record<string, unknown>;
+    if (typeof d.reason === "string") {
+      return typeof d.hint === "string" && d.hint ? `${d.reason}（${d.hint}）` : d.reason;
+    }
+    return JSON.stringify(d);
+  }
+  return statusText;
 }
 
 export class ApiError extends Error {

@@ -116,17 +116,22 @@ export function CitationCard({
           {verdict.icon}
           {verdict.label}
         </span>
-        {/* 证据强度：只有 html 才配叫"正文原文"，abstract/pdf/缺失一律"摘要级证据" */}
+        {/* 证据强度三档，与后端 `_STRENGTH_LABELS`（app/export/markdown.py）同一口径：
+            只有 html/pdf 才是正文级证据，其中 pdf 是用户上传的全文；abstract 与缺失才是摘要级。 */}
         <span
           className={cn(
             "rounded-full px-2 py-0.5 font-mono text-[10px]",
-            source === "html"
-              ? "bg-white/[0.04] text-ink-soft"
-              : "bg-white/[0.04] text-neon-amber",
+            source === "abstract" || !source ? "bg-white/[0.04] text-neon-amber" : "bg-white/[0.04] text-ink-soft",
           )}
-          title={source === "html" ? "证据来自论文 HTML 正文" : "未取到 HTML 正文：摘要降级 / 上传件 / 来源缺失"}
+          title={
+            source === "html"
+              ? "证据来自论文 HTML 正文"
+              : source === "pdf"
+                ? "证据来自用户上传文档的全文"
+                : "只到摘要级：未取到正文原文"
+          }
         >
-          {source === "html" ? "正文原文" : "摘要级证据"}
+          {source === "html" ? "正文原文" : source === "pdf" ? "上传件全文" : "摘要级证据"}
         </span>
         {arxiv_id ? (
           <span className="inline-flex items-center gap-1 rounded-full bg-white/[0.04] px-2 py-0.5 font-mono text-[10px] text-neon-cyan">

@@ -76,3 +76,36 @@ describe("api.config 发出的请求形状", () => {
     expect(req.body).toEqual({ provider: "ollama", ollama_base_url: "http://localhost:11434" });
   });
 });
+
+describe("结构化错误 detail 的渲染", () => {
+  // 后端把对外错误从"异常原文"改成 `{code, reason, hint}` 之后，
+  // 前端把 detail 整体 stringify 就等于把 `{"code":"not_resumable",...}` 糊在红条上。
+  function stubError(status: number, detail: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      () =>
+        Promise.resolve(
+          new Response(JSON.stringify({ detail }), {
+            status,
+            headers: { "Content-Type": "application/json" },
+          }),
+        ),
+    );
+  }
+
+  it("对象 detail 取 reason 给人看，而不是 JSON 残骸", async () => {
+    stubError(409, { code: "not_resumable", run_id: "a".repeat(16), status: "completed", reason: "该 run 已经跑完，不能再次续跑" });
+    await expect(api.papers.get("2401.00001")).rejects.toThrow("该 run 已经跑完，不能再次续跑");
+  });
+
+  it("hint 一起给出，但绝不出现裸 code JSON", async () => {
+    stubError(404, { code: "paper_not_found", reason: "论文 2401.00001 不在库中（尚未入库或 id 写错）" });
+    await expect(api.papers.get("2401.00001")).rejects.toThrow(/不在库中/);
+    await expect(api.papers.get("2401.00001")).rejects.not.toThrow(/^\{"/);
+  });
+
+  it("字符串 detail 保持原样（历史接口仍在用）", async () => {
+    stubError(400, "prompt_injection_detected");
+    await expect(api.papers.get("2401.00001")).rejects.toThrow("prompt_injection_detected");
+  });
+});

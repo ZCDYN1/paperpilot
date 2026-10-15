@@ -155,7 +155,7 @@ const referenceSection = (() => {
     seen.add(key);
     const idx = lines.length + 1;
     const title = titles.get(c.arxiv_id) ?? c.claim.slice(0, 24);
-    const strength = c.source === "abstract" ? "摘要级证据" : "正文原文";
+    const strength = c.source === "abstract" ? "摘要级证据" : c.source === "pdf" ? "上传件全文" : "正文原文";
     lines.push(`[${idx}] ${title} — arXiv:${c.arxiv_id}（章节：${c.locator ?? "abstract"}｜${strength}）`);
   }
   if (lines.length === 0) return "";

@@ -122,7 +122,7 @@ export const mockCitations: CitationBundle = {
       quote:
         "we train a single arbitrary LM that adaptively retrieves passages on-demand, and generates and reflects on retrieved passages and generated text using special tokens, called reflection tokens.",
       locator: "Abstract · §3.1",
-      source: "read",
+      source: "html",
       verified: true,
       note: null,
       resolution_how: "exact",
@@ -135,7 +135,7 @@ export const mockCitations: CitationBundle = {
       quote:
         "Self-RAG (7B and 13B) substantially improves the factuality and citation accuracy of closed-book LMs, outperforming ChatGPT on ASQA.",
       locator: "§1 Introduction · ¶2",
-      source: "read",
+      source: "html",
       verified: true,
       note: null,
       resolution_how: "quote",
@@ -148,7 +148,7 @@ export const mockCitations: CitationBundle = {
       quote:
         "a lightweight retrieval evaluator is designed to assess the overall quality of retrieved documents for a query, returning a confidence score based on three classes: Correct / Incorrect / Ambiguous",
       locator: "§3 Method · 3.1",
-      source: "read",
+      source: "html",
       verified: true,
       note: null,
       resolution_how: "exact",
@@ -161,7 +161,7 @@ export const mockCitations: CitationBundle = {
       quote:
         "we introduce residual compression, which encodes each passage into 64-dimensional vectors and reduces storage by 6–10x.",
       locator: "Abstract",
-      source: "read",
+      source: "abstract",
       verified: true,
       note: null,
       resolution_how: "swapped_chunk",
@@ -173,7 +173,7 @@ export const mockCitations: CitationBundle = {
       chunk_id: null,
       quote: null,
       locator: null,
-      source: "verify",
+      source: "abstract",
       verified: false,
       note: "原文只在部分子集上报告提升，未覆盖全部 18 个数据集 —— 论断被夸大",
       resolution_how: "quote",
@@ -185,7 +185,7 @@ export const mockCitations: CitationBundle = {
       chunk_id: null,
       quote: null,
       locator: null,
-      source: "verify",
+      source: "abstract",
       verified: false,
       note: "「立即成为工业标准」无任何原文支撑，已从正文剔除",
       resolution_how: null,

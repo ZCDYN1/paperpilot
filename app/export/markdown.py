@@ -39,6 +39,14 @@ from app.db.models import Citation, ComparisonRecord, Message, Paper, ResearchRu
 # 固定声明（产品定义 §7）：正文里已有就不重复追加（与 writer 节点同一去重约定）。
 _FOOTER = "> 本文由 AI 生成，引用请以原文为准。"
 
+#: `Citation.source` 的三档证据强度 → 对外措辞。口径同时被前端引用卡片复用
+#: （`web/src/components/business/CitationCard.tsx`），别在四处各写一遍二元判断。
+_STRENGTH_LABELS: dict[str, str] = {
+    "html": "正文原文",
+    "pdf": "上传件全文",
+    "abstract": "摘要级证据",
+}
+
 # 对比表 9 列：表头 → ComparisonRecord 属性名（顺序即列顺序，产出物 A 口径）。
 _TABLE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("方法", "method_name"),
@@ -113,8 +121,10 @@ def _reference_block(citations: list[Citation], titles: dict[str, str]) -> tuple
         order[key] = idx
         title = titles.get(c.arxiv_id or "", c.arxiv_id or "")
         locator = c.locator or "abstract"
+        # 三档证据强度各自有名字：把上传件叫"摘要级"是低估，把摘要叫"正文原文"是高估，
+        # 两者都会让读者对"这条结论的证据有多硬"形成错误判断。
         # source 拿不到（历史行 NULL）时**如实标摘要级**，绝不高估证据强度。
-        strength = "摘要级证据" if (c.source or "abstract") == "abstract" else "正文原文"
+        strength = _STRENGTH_LABELS.get(c.source or "abstract", "摘要级证据")
         lines.append(f"[{idx}] {title} — arXiv:{c.arxiv_id or ''}（章节：{locator}｜{strength}）")
     block = "## 参考文献\n\n" + "\n".join(lines) if lines else ""
     return block, unsupported
@@ -131,11 +141,14 @@ def _cost_block(run: ResearchRun, usages: list[TokenUsage]) -> str:
         f"- 成本估算：{total.cost_estimate if total.cost_estimate is not None else '—'}（粗略单价，非账单）",
     ]
     if run.started_at and run.ended_at:
-        duration = run.ended_at - run.started_at
-        lines.append(
-            f"- 耗时：{int(duration.total_seconds() // 60)} 分 "
-            f"{int(duration.total_seconds() % 60)} 秒"
-        )
+        # 墙钟差值里混着 HITL 的等待（用户审阅/改子问题，可能几分钟也可能通宵），
+        # 直接报出来会是一份自称"运行耗时"、实际是"运行 + 人类思考"的混合数字。
+        waited = (run.langgraph_state or {}).get("hitl_wait_seconds") or 0
+        seconds = max((run.ended_at - run.started_at).total_seconds() - float(waited), 0.0)
+        text = f"- 耗时：{int(seconds // 60)} 分 {int(seconds % 60)} 秒"
+        if waited:
+            text += f"（已扣除等待用户确认拆解的 {int(float(waited) // 60)} 分 {int(float(waited) % 60)} 秒）"
+        lines.append(text)
     else:
         lines.append("- 耗时：—（run 未正常收尾，起止时间不完整）")
     return "\n".join(lines)
