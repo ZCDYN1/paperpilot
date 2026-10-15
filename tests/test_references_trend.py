@@ -226,3 +226,28 @@ async def test_trend_reports_direction_with_two_days(scope, monkeypatch):
     out = await citation_trend("2305.15334")
     assert out["verdict"] == "rising"
     assert out["delta"] == 4 and out["span_days"] == 7
+
+
+# --------------------------------------------------------------------------- 用户可见文案里的接口路径
+async def test_note_mentions_only_routes_that_actually_exist(scope):
+    """`note` 会被前端**原样显示**，所以里面写死的接口路径属于对外契约的一部分。
+
+    这条不是形式主义：这里曾经写成 `POST /api/v1/papers/snapshot-citations`，
+    真实路由是 `/api/v1/papers/citations/snapshot` —— 用户照着提示点就是 404，
+    而提示存在的意义正是"告诉下一步该干什么"。写错的提示比没有提示更糟。
+    """
+    import re
+
+    from app.main import create_app
+
+    await _seed_papers(scope, ["2305.15334"])
+    note = (await citation_trend("2305.15334"))["note"]
+
+    mentioned = set(re.findall(r"/api/v1[/\w-]*", note))
+    assert mentioned, "提示里应当给出下一步的接口，否则用户不知道要做什么"
+
+    # 用 OpenAPI 而不是 app.routes：这个 FastAPI 版本把 include_router 存成惰性的
+    # _IncludedRouter 对象，`r.path` 拿不到子路由，只有 openapi() 才是权威的对外清单。
+    real = set(create_app().openapi()["paths"])
+    missing = sorted(p for p in mentioned if p not in real)
+    assert not missing, f"提示里写了不存在的路径（用户会拿到 404）：{missing}"

@@ -179,6 +179,29 @@ class ComparisonRow(BaseModel):
             "必须是片段里作者的自述，不能是推断、不能是他人评价；没有就填 \"\"。"
         ),
     )
+    # ---- 上面三个自由文本列的**证据**：校验落在英文摘录上，展示仍是中文值 ----
+    # 为什么要单独要一段摘录：prompt 要求"字段值用中文描述"，而后端的反幻觉判据
+    # 要求值里含英文锚点 —— 中文散文没有英文锚点，于是这三列会被整列清空。
+    # 把"展示"与"证据"拆成两个字段，两条规则才同时成立（见 nodes/comparator._ground_prose）。
+    core_idea_evidence: str = Field(
+        default="",
+        description=(
+            "支撑 core_idea 的**英文原文逐字摘录**（20~200 字符，必须能在片段里原样找到）。"
+            "不允许翻译、改写或压缩；找不到支撑就把 core_idea 与此处都填 \"\"。"
+        ),
+    )
+    cost_evidence: str = Field(
+        default="",
+        description=(
+            "支撑 cost 的**英文原文逐字摘录**（20~200 字符）。作者没写代价就两个都填 \"\"。"
+        ),
+    )
+    limitation_evidence: str = Field(
+        default="",
+        description=(
+            "支撑 limitation 的**英文原文逐字摘录**（20~200 字符），必须是作者自述那句。"
+        ),
+    )
     code_url: str = Field(
         default="",
         description="代码仓库链接。由系统从正文/摘要里抽取真实 URL；模型请一律留空。",

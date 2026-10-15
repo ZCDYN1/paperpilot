@@ -31,6 +31,7 @@ from app.analysis.venue_tiers import lookup as lookup_tier
 from app.api.guards import guard_run_id, guard_text
 from app.db.models import Paper, PaperChunk
 from app.db.session import session_scope
+from app.ingest.manual import ingest_by_ids, ingest_by_query
 from app.ingest.pdf import (
     EmptyDocumentError,
     EncryptedDocumentError,
@@ -74,6 +75,27 @@ class AskBody(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
 
 
+class IngestBody(BaseModel):
+    """`POST /papers/ingest` 的请求体：`arxiv_ids` 与 `query` 两种模式**二选一**。
+
+    - 二选一的互斥判定放在路由里而不是 model_validator：要的是本文件统一口径的
+      `{code, field, reason, hint}` 错误形状（detail=dict），而 validator 抛的是
+      FastAPI 默认的 422 列表 —— 报错形状对外是契约，不能因校验位置而分叉；
+    - `max_results` 上限与 `MAX_IDS_PER_REQUEST` 同源：两种模式吃的是**同一份
+      串行限速配额**（~1 req/3s），封顶等待时间的逻辑不该各说各话；
+    - 空列表 / 超长列表由 pydantic 的 min/max_length 先拦（与其他接口的 422 同形状）。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    arxiv_ids: list[str] | None = Field(default=None, min_length=1, max_length=MAX_IDS_PER_REQUEST)
+    query: str | None = Field(default=None, min_length=2, max_length=300)
+    categories: list[str] | None = Field(default=None, min_length=1, max_length=8)
+    year_gte: int | None = Field(default=None, ge=1990, le=2100)
+    year_lte: int | None = Field(default=None, ge=1990, le=2100)
+    max_results: int = Field(default=MAX_IDS_PER_REQUEST, ge=1, le=MAX_IDS_PER_REQUEST)
+
+
 def _guard_ids(ids: list[str]) -> list[str]:
     """论文 id / 上传文档 id 复用与 `run_id` 同一套字符集闸门。
 
@@ -105,6 +127,31 @@ def _guard_ids(ids: list[str]) -> list[str]:
                 },
             ) from exc
     return out
+
+
+def _guard_categories(cats: list[str] | None) -> list[str] | None:
+    """分类过滤复用 `guard_run_id` 的字符集：`cs.CL` 这类合法值全通过，
+    而空格 / `/` / 控制字符会被拼进 arXiv 检索式造成语法错 4xx ——
+    按客户端规则 4xx **不重试**，白等一轮限速还查不到原因（arxiv_client 模块头注）。
+    同样不另写一份正则：校验分叉后，弱的那一处就是入口。"""
+    if cats is None:
+        return None
+    out: list[str] = []
+    for raw in cats:
+        value = (raw or "").strip()
+        try:
+            out.append(guard_run_id(value))
+        except HTTPException as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "invalid_input",
+                    "field": "categories",
+                    "reason": "分类只允许字母、数字与 . _ -，长度 1~64",
+                    "hint": "形如 cs.CL、cs.LG、math.GT。",
+                },
+            ) from exc
+    return out or None
 
 
 # --------------------------------------------------------------------------- F19 会议分级
@@ -202,6 +249,65 @@ async def list_papers(
             for p in papers
         ],
     }
+
+
+# --------------------------------------------------------------------------- 批量手动入库
+# ⚠️ 与 `/venue-tier` 同一条顺序纪律：**静态路径必须声明在 `/{arxiv_id}` 动态路由之前**。
+# FastAPI 按声明顺序匹配，顺序错了不会报错，只会得到"论文不存在"式的意外响应 ——
+# tests/test_api_ingest.py 里有一条形同哨兵的注册断言。
+@router.post("/ingest", summary="按 arxiv_id 列表或关键词批量入库建索引（架构 §7 的 ingest 入口）")
+async def ingest_papers(body: IngestBody) -> dict[str, Any]:
+    """界面上「按 id 导入论文」的后端；抓取/分块/落库/索引刷新全在 `app/ingest/manual.py`。
+
+    形状闸门沿用本文件既有口径：id 走 `_guard_ids`（与 run_id 同一字符集），
+    分类走 `_guard_categories`，query 走 `guard_text`（注入判定 + 清洗，
+    **用清洗后的那份**继续往下走）。数量上限沿用 `MAX_IDS_PER_REQUEST`。
+
+    为什么 arXiv 串行限速（~1 req/3s，50 篇最坏 ≈ 150s+）下**仍返回同步 200 而不是
+    202 + 任务 id**：202 需要第三处任务状态设施（引入新依赖，禁止；塞 checkpointer
+    则把 ingest 耦合进编排层）；处理函数是 async 的，长的是这一条连接、不是服务
+    整体；串行是 arXiv 的外部硬约束，后台化不会更快、只把"等"变成"轮询"；
+    等待时间由 50 篇封顶，且入库幂等（缓存优先 + 按 id upsert），客户端超时后
+    **原样重试就是最优恢复**。取舍详注见 `manual.ingest_by_ids` docstring。
+
+    `INGEST_ENABLED=false` 只约束 Agent 的**自动**抓网（离线演示/CI 场景），
+    不否决这条**用户显式发起**的入库 —— 发起 POST 本身就是最明确的联网意向。
+
+    返回体 `fetched / cached / failed` 三个计数 + `failures[{arxiv_id, error}]`：
+    单篇失败逐条带 id 原样透出，不静默吞（见 manual 模块头注与 pipeline 同条原则）。
+    """
+    has_ids = body.arxiv_ids is not None
+    has_query = body.query is not None
+    if has_ids == has_query:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "invalid_input",
+                "field": "arxiv_ids/query",
+                "reason": "arxiv_ids 与 query 二选一：给 id 列表按篇入库，给关键词按检索入库",
+                "hint": '形如 {"arxiv_ids": ["2305.15334"]} 或 {"query": "hybrid retrieval", "max_results": 20}。',
+            },
+        )
+    if body.year_gte is not None and body.year_lte is not None and body.year_lte < body.year_gte:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "invalid_input",
+                "field": "year_lte",
+                "reason": f"year_lte={body.year_lte} 早于 year_gte={body.year_gte}",
+            },
+        )
+
+    if has_ids:
+        return await ingest_by_ids(_guard_ids(body.arxiv_ids or []))
+    query = guard_text(body.query or "", field="query")
+    return await ingest_by_query(
+        query,
+        categories=_guard_categories(body.categories),
+        year_gte=body.year_gte,
+        year_lte=body.year_lte,
+        max_results=body.max_results,
+    )
 
 
 # --------------------------------------------------------------------------- F13 单篇深挖

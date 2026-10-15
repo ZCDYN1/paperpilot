@@ -135,9 +135,12 @@ async def citation_trend(arxiv_id: str) -> dict[str, Any]:
         "span_days": None,
     }
     if len(series) < 2:
+        # ⚠️ 这句话会被前端**原样显示**给用户，所以里面的接口路径必须是真的：
+        # 曾经写成 `/papers/snapshot-citations`，用户照着点就是 404。
+        # 路径由 tests/test_references_trend.py 对着 FastAPI 的路由表校验，别再手改错。
         result["note"] = (
             f"只有 {len(series)} 个采样点，无法判断趋势。"
-            "再调用一次 POST /api/v1/papers/snapshot-citations 才会多出一天。"
+            "再调用一次 POST /api/v1/papers/citations/snapshot 才会多出一天。"
         )
         return result
 

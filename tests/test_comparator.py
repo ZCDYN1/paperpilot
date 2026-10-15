@@ -356,3 +356,119 @@ async def test_notes_report_missing_columns_in_event(meta, fake_llm):
     assert "非编造" in thought["comparison_notes"]
     assert "数据集" in thought["comparison_notes"]      # B/C 的数据集缺失，应被点名
     assert thought["comparison_generated_at"]
+
+
+# --------------------------------------------------------------------------- 中文值 + 英文摘录
+# 这组用例锁的是 F4 曾经"整列被清空"的那个 bug：prompt 要中文描述，
+# 而旧的逐字段校验要求值里含英文锚点 —— 中文散文没有，于是 8 行对比表 with_content=0。
+# 现在的口径是：中文值配一段**片段里逐字存在的英文原句**当证据，校验落在摘录上。
+async def test_chinese_prose_survives_when_evidence_is_verbatim(meta, fake_llm):
+    fake_llm(
+        ComparisonTable(
+            rows=[
+                ComparisonRow(
+                    arxiv_id=_A,
+                    core_idea="用交叉编码器对每个查询-文档对逐对打分",
+                    core_idea_evidence="CrossRanker scores each query document pair with a cross encoder.",
+                )
+            ]
+        )
+    )
+    rows = _rows_by_id(await comparator.compare_node(_STATE))
+    assert rows[_A]["core_idea"].startswith("用交叉编码器"), "中文值被清空 == 这个 bug 又回来了"
+
+
+async def test_fabricated_evidence_clears_the_value(meta, fake_llm):
+    """摘录必须是原文里真有的句子。编一句像模像样的英文，值照样要被清空。"""
+    fake_llm(
+        ComparisonTable(
+            rows=[
+                ComparisonRow(
+                    arxiv_id=_A,
+                    cost="训练成本极高，需要多卡集群",
+                    cost_evidence="The model was trained on 512 GPUs for three weeks.",
+                )
+            ]
+        )
+    )
+    rows = _rows_by_id(await comparator.compare_node(_STATE))
+    assert rows[_A]["cost"] == ""
+
+
+async def test_phrase_length_evidence_is_not_accepted(meta, fake_llm):
+    """三个词级别的"摘录"在任何语料里都能撞上，等于没有校验，所以有最短长度门槛。"""
+    fake_llm(
+        ComparisonTable(
+            rows=[
+                ComparisonRow(
+                    arxiv_id=_A,
+                    limitation="长文档场景下会掉点",
+                    limitation_evidence="cross encoder",
+                )
+            ]
+        )
+    )
+    rows = _rows_by_id(await comparator.compare_node(_STATE))
+    assert rows[_A]["limitation"] == ""
+
+
+def test_ground_prose_falls_back_to_anchor_rule():
+    """值本身带英文术语时旧路径仍然有效（mock provider 不产出摘录，靠这条活着）。"""
+    corpus = comparator.normalize_text(
+        "We propose CrossRanker, a cross encoder reranker for retrieval."
+    )
+    assert comparator._ground_prose("用 CrossRanker 做重排", "", corpus) == "用 CrossRanker 做重排"
+    assert comparator._ground_prose("纯中文没有锚点", "", corpus) == ""
+
+
+# --------------------------------------------------------------------------- 行归位（漏填 id 不该废掉整表）
+def _papers(*ids_and_titles: tuple[str, str]) -> list[dict[str, Any]]:
+    return [{"arxiv_id": a, "title": t, "score": 1.0, "chunks": []} for a, t in ids_and_titles]
+
+
+def test_bind_rows_recovers_row_with_missing_id_via_title():
+    """模型漏填 `arxiv_id`（7B 常见）时按标题归位，而不是当幻觉行丢掉。"""
+    papers = _papers((_A, "CrossRanker: Cross Encoder Reranking"), (_B, "A Lightweight Reranking Module"))
+    rows = [ComparisonRow(arxiv_id="", title="CrossRanker: cross-encoder reranking", core_idea="x")]
+    bound, dropped = comparator._bind_rows(rows, papers)
+    assert dropped == 0 and list(bound) == [_A]
+
+
+def test_bind_rows_positional_only_when_exactly_one_left():
+    """只剩一篇未认领候选、且只剩一行无主内容时才补位 —— 没有猜测空间才允许。"""
+    papers = _papers((_A, "Paper A"), (_B, "Paper B"))
+    rows = [
+        ComparisonRow(arxiv_id=_A, title="Paper A"),
+        ComparisonRow(arxiv_id="", title=""),          # 只能归到 _B
+    ]
+    bound, dropped = comparator._bind_rows(rows, papers)
+    assert dropped == 0 and set(bound) == {_A, _B}
+
+
+def test_bind_rows_refuses_to_guess_when_ambiguous():
+    """两行无主、两篇未认领 → 一律不补位。把 A 的描述挂到 B 头上比空表更糟。"""
+    papers = _papers((_A, "Paper A"), (_B, "Paper B"), (_C, "Paper C"))
+    rows = [
+        ComparisonRow(arxiv_id="", title=""),
+        ComparisonRow(arxiv_id="", title=""),
+    ]
+    bound, dropped = comparator._bind_rows(rows, papers)
+    assert bound == {} and dropped == 2
+
+
+def test_bind_rows_still_drops_fabricated_id():
+    """底线没松动：候选集之外的 id 仍然是丢弃，并且与"漏填"分开计数。"""
+    papers = _papers((_A, "Paper A"))
+    rows = [ComparisonRow(arxiv_id="9999.99999", title="Made Up")]
+    bound, dropped = comparator._bind_rows(rows, papers)
+    assert bound == {} and dropped == 1
+
+
+def test_bind_rows_duplicate_id_keeps_first_row():
+    papers = _papers((_A, "Paper A"))
+    rows = [
+        ComparisonRow(arxiv_id=_A, core_idea="第一行"),
+        ComparisonRow(arxiv_id=_A, core_idea="重复行"),
+    ]
+    bound, dropped = comparator._bind_rows(rows, papers)
+    assert dropped == 0 and bound[_A].core_idea == "第一行"

@@ -306,7 +306,10 @@ def _grounded_value(name: str, prompt: str, index: int) -> Any:
         # 所以这里不再需要 id→chunk_id 的名称映射。
         raw = doc.get("chunk_id")
         return int(raw) if raw and str(raw).isdigit() else None
-    if name in ("quote", "evidence", "snippet"):
+    if name in ("quote", "evidence", "snippet") or name.endswith("_evidence"):
+        # `*_evidence`（对比表里"中文值 + 英文原文摘录"的摘录侧）走同一条路：
+        # mock 若给空串，新的摘录校验分支在离线测试里就永远走不到，
+        # 表现为"单测全绿、换真模型才发现整列被清空"。
         body = re.sub(r"\s+", " ", doc.get("text", "")).strip()
         return body[:80] if body else None
     if name in ("locator", "section"):

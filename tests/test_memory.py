@@ -166,9 +166,24 @@ async def test_long_term_evict_is_noop_below_capacity(scope, embedder):
     assert await store.count(session_id="s1") == 2
 
 
-async def test_long_term_remember_run_writes_direction_and_papers(long_term):
-    """`finalize` 节点通过 `remember_run` 接入：方向 + 已读论文都要写入。"""
-    ids = await long_term.remember_run(
+async def test_long_term_remember_run_writes_direction_and_papers(scope, embedder):
+    """`finalize` 节点通过 `remember_run` 接入：方向 + 已读论文都要写入。
+
+    ## ★ 为什么这里刻意不断言"被淘汰的是哪一条"
+    两篇已读论文的重要度都是 0.4（`remember_run` 写死的），而保留分是
+    `importance * 0.7 + 新鲜度 * 0.3`。`created_at` 来自 SQLite 的
+    `CURRENT_TIMESTAMP`，**精度只有 1 秒**：
+    - 两次写入落在同一秒内 → 分数完全相等 → 淘汰谁由排序稳定性决定；
+    - 两次写入恰好跨过秒边界 → 早写进去的那条新鲜度更低 → 换成它被淘汰。
+    也就是说"哪一篇活下来"取决于墙钟读数，而不是被测逻辑。以前这个用例断言
+    `2401.00001` 一定活下来，机器负载一高（写入间隔变大）就会偶发红：
+    `assert any("2401.00001" in h for h in hits)` —— 单跑必过、全量偶发红。
+    所以下面只断言**与墙钟无关**的量：写进去的条数 / 类型 / 已读清单，
+    淘汰部分断言"少了一条已读论文、方向与偏好仍在"。
+    """
+    # ① 写入语义：容量给足，先看清 remember_run 到底写了什么（不发生淘汰）
+    store = LongTermMemoryStore(scope=scope, embedder=embedder, max_items=10)
+    ids = await store.remember_run(
         session_id="s1",
         run_id="r1",
         question="RAG 重排技术发展脉络",
@@ -176,13 +191,33 @@ async def test_long_term_remember_run_writes_direction_and_papers(long_term):
         summary="重排显著提升召回质量",
     )
     assert len(ids) == 4  # direction + 结论摘要(preference) + 2 篇已读论文
-    assert await long_term.count(session_id="s1") == 3  # max_items=3 → 触发淘汰
+    assert await store.count(session_id="s1") == 4  # 未超容量 → 一条不剩地都在
 
-    hits = await long_term.recall("已读论文 arxiv_id=2401.00001", top_k=10, session_id="s1")
+    # 两篇都已登记为"已读"（这是 F10 排除重复精读的唯一依据）
+    assert await store.read_paper_ids(session_id="s1") == {"2401.00001", "2401.00002"}
+
+    hits = await store.recall("已读论文 arxiv_id=2401.00001", top_k=10, session_id="s1")
     assert any("2401.00001" in h for h in hits)
+    assert any("2401.00002" in h for h in hits)
+
     # 数据类型标记正确
     from app.db.models import LongTermMemory  # noqa: PLC0415
 
-    async with long_term._scope() as session:  # noqa: SLF001 - 测试内直查校验
+    async with store._scope() as session:  # noqa: SLF001 - 测试内直查校验
         types = {r.memory_type for r in (await session.execute(select(LongTermMemory))).scalars().all()}
-    assert types <= {TYPE_DIRECTION, TYPE_READ_PAPER, "preference"}
+    assert types == {TYPE_DIRECTION, TYPE_READ_PAPER, "preference"}
+
+    # ② 淘汰语义：把容量压到 3（4 条 → 必须删 1 条），只断言与墙钟无关的性质
+    store.max_items = 3
+    assert await store.evict(session_id="s1") == 1
+    assert await store.count(session_id="s1") == 3
+
+    # 被淘汰的只会是两条并列 0.4 的已读论文之一 —— 具体是哪一条不作断言（见 docstring）
+    survivors = await store.read_paper_ids(session_id="s1")
+    assert len(survivors) == 1
+    assert survivors <= {"2401.00001", "2401.00002"}
+
+    # 重要度更高的方向 / 偏好记忆不该被挤掉
+    remaining = set(await store.recall("RAG 重排技术发展脉络", top_k=10, session_id="s1"))
+    assert "RAG 重排技术发展脉络" in remaining
+    assert any("重排显著提升召回质量" in r for r in remaining)

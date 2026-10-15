@@ -32,13 +32,17 @@
 可行且确定性的近似是：把字段值里的**英文/数字锚点**（方法名、数据集名、指标名、数值）
 抠出来，逐个去该论文的片段里找 —— 忠实抽取一定会复用原文里的这些词，
 而凭空编造的数据集名 / 指标名几乎必然找不到。
-⚠️ 纯中文、不含任何英文/数字锚点的字段值**无法核对**，一律清空（宁缺毋滥）。
-副作用是：概括性字段如果写成纯中文会被清掉。这是刻意的保守取舍（见交付报告"需要决策"）。
+⚠️ 纯中文、不含任何英文/数字锚点的字段值**用这条规则核对不了**，而"字段值用中文描述"
+又是这张表的可读性要求（产品定义 §4 产出物 A）—— 两条规则不能互相抵消。
+所以三个自由文本列（核心思路 / 代价 / 局限）另走一条契约：模型必须同时给出
+**片段里逐字存在的英文原句摘录**，校验落在摘录上、展示仍是中文（见 `_ground_prose`）；
+抽取式字段（方法名 / 数据集 / 提升）继续用锚点规则。两条路都不满足才清空。
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -88,6 +92,17 @@ _GROUNDED_FIELDS = (
     "cost",
     "limitation",
 )
+
+# 自由文本列 → 该列配套的"英文原文摘录"字段名（校验落在摘录上，见 `_ground_prose`）。
+# 只有这三列需要：`method_name / datasets / improvement` 本身就是抽取式的，
+# 值里天然带英文术语或数字，锚点校验对它们既有效又不误伤。
+_PROSE_EVIDENCE = {
+    "core_idea": "core_idea_evidence",
+    "cost": "cost_evidence",
+    "limitation": "limitation_evidence",
+}
+# 摘录至少要这么长才算证据：一个 3 个词的短语在任何语料里都能撞上，等于没校验。
+_MIN_EVIDENCE_CHARS = 20
 
 # 锚点词：① 英文词（长度 ≥3，含数字后缀，如 BM25 / nDCG）；② 数值（如 3.2 / 10）。
 # 刻意**不允许连字符**：论文里 "cross-encoder" 与概括里的 "cross encoder" 必须视为同一个词，
@@ -244,10 +259,37 @@ def _build_notes(rows: list[dict[str, Any]]) -> str:
     )
 
 
+def _ground_prose(value: str, evidence: str, corpus: str) -> str:
+    """自由文本列（核心思路 / 代价 / 局限）的校验：**核英文摘录，不核中文译文**。
+
+    这里修的是一条规则冲突，冲突双方各自都有道理：
+    - prompt 要求"字段值用**中文**描述"（产品定义 §4 产出物 A 的可读性）；
+    - `is_grounded` 要求值里**至少含一个英文锚点**（反幻觉的保守判据）。
+    中文散文几乎必然不含英文锚点，于是 `_row_from` 把整列清空——实测日志
+    `compare.done rows=8 with_content=0 dropped_rows=0`，且没有 `compare.llm_failed`，
+    说明模型答对了、是校验把内容全杀了。
+
+    解法是把"展示"和"证据"拆成两个字段：模型必须同时给出**片段里的英文原句逐字摘录**，
+    校验落在摘录上，展示仍用中文值。这与 read/verify 那条「论断 + 逐字引文」的契约同构，
+    不是新发明的口径。
+
+    保留旧路径是为了不放松也不误伤：值本身能过锚点校验时照旧收下
+    （mock provider 不产出摘录字段；模型偶尔也会直接把英文术语写进中文句子里，
+    那种情况本来就有依据）。两条都不满足才清空 —— 宁缺毋滥的口径一字未改。
+    """
+    v = (value or "").strip()
+    if not v:
+        return ""
+    quote = normalize_text((evidence or "").strip())
+    if len(quote) >= _MIN_EVIDENCE_CHARS and quote in corpus:
+        return v
+    return v if is_grounded(v, corpus) else ""
+
+
 def _row_from(paper: dict[str, Any], row: ComparisonRow | None, meta: dict[str, Any]) -> dict[str, Any]:
     """把「一篇论文 + 模型填的格子 + 权威元数据」合成**最终的**一行。
 
-    ⚠️ 顺序很重要：先让模型的自由文本过 `_ground`（找不到依据清空），
+    ⚠️ 顺序很重要：先让模型的自由文本过校验（找不到依据清空），
     再用权威来源覆盖 `venue / cited_by_count / cited_at / code_url`，
     最后 `title` 以检索结果为准。这样任何一列都不会"因为模型编得顺口"而进入表格。
     """
@@ -259,7 +301,13 @@ def _row_from(paper: dict[str, Any], row: ComparisonRow | None, meta: dict[str, 
     }
     for name in _GROUNDED_FIELDS:
         raw = getattr(row, name, "") if row is not None else ""
-        final[name] = _ground(raw, corpus)
+        evidence_field = _PROSE_EVIDENCE.get(name)
+        if evidence_field is None:
+            final[name] = _ground(raw, corpus)
+        else:
+            final[name] = _ground_prose(
+                raw, getattr(row, evidence_field, "") if row is not None else "", corpus
+            )
 
     # ---- 权威覆盖 ----
     # ⚠️ code_url 必须在**未归一**的原文上抽：`normalize_text` 会把整段转小写，
@@ -301,6 +349,82 @@ def _render_evidence(items: list[dict[str, Any]], allowed: set[str], *, max_item
         if len(blocks) >= max_items:
             break
     return "\n\n".join(blocks)
+
+
+def _title_key(title: str) -> str:
+    """标题归一成一个只用于**匹配**的键（去掉大小写与所有非字母数字）。"""
+    return re.sub(r"[^a-z0-9]", "", (title or "").lower())
+
+
+def _bind_rows(
+    rows: Sequence[ComparisonRow], papers: list[dict[str, Any]]
+) -> tuple[dict[str, ComparisonRow], int]:
+    """把模型报出的行归位到本次候选论文上，返回 `(按 id 索引的行, 丢弃数)`。
+
+    ★ 这里修的是"整张对比表被清空"这个真实故障：`ComparisonRow.arxiv_id` 有默认值 `""`，
+    而本地小模型经常**整字段漏填 id**（实测 5 次里 4 次 `with_content=0`、
+    `dropped_rows=3`，可模型填的内容本身是对的）。旧逻辑把"没填 id"和"id 是编的"
+    当成同一件事一律丢弃 —— 于是 7B 模型下一个字段漏填就废掉整表。
+
+    归位顺序如下，**任何一步都不允许造出候选集之外的 id**（这是底线，不是优化目标）：
+    1. id 合法 → 直接归位（同一 id 出现多次只认第一行）；
+    2. id **缺失**、且标题能**唯一**对上某篇未认领候选 → 按标题归位；
+    3. 只剩一行无主内容、且只剩一篇未认领候选 → 补位。
+       只做 1↔1：N↔N 的顺序对齐在小模型输出里并不可靠，猜错的代价是把 A 论文的描述
+       挂到 B 头上，那比空着更糟；
+    4. id 是**编的**（非空但不在候选集里）→ 始终丢弃，不参与任何归位；
+    5. 仍然归不了的计入 `dropped`。
+    """
+    candidates = [str(p.get("arxiv_id") or "") for p in papers]
+    allowed = {c for c in candidates if c}
+    by_title: dict[str, str] = {}
+    title_ambiguous: set[str] = set()
+    for c in candidates:
+        key = _title_key(str(next((p.get("title") for p in papers if p.get("arxiv_id") == c), "")))
+        if not key:
+            continue
+        if key in by_title:
+            title_ambiguous.add(key)
+        else:
+            by_title[key] = c
+
+    bound: dict[str, ComparisonRow] = {}
+    unbound: list[ComparisonRow] = []
+    fabricated = 0
+    for row in rows:
+        if row.arxiv_id in allowed:
+            bound.setdefault(row.arxiv_id, row)
+            continue
+        # ⚠️ 只救"**没填** id"的行。填了一个候选集之外的 id，是模型在指认另一篇论文，
+        # 这种行即使标题碰巧对上也不归位 —— 否则"编 id"这条最该拦的行为反而被救活了，
+        # 而把 A 论文的描述挂到 B 头上，比空着一格危险得多。
+        if (row.arxiv_id or "").strip():
+            fabricated += 1
+            continue
+        key = _title_key(row.title)
+        if key and key not in title_ambiguous and key in by_title and by_title[key] not in bound:
+            bound[by_title[key]] = row
+            continue
+        unbound.append(row)
+
+    # 第 3 步：只剩一条候选、也只剩一行无主内容时才补位（一对一，不存在猜测空间）
+    leftover_ids = [c for c in candidates if c and c not in bound]
+    if len(leftover_ids) == 1 and len(unbound) == 1:
+        bound[leftover_ids[0]] = unbound.pop()
+
+    dropped = len(unbound) + fabricated
+    if dropped:
+        # 区分"编了个不存在的 id"与"根本没填 id"：两者的处置完全不同
+        # （前者是模型在造假、必须丢；后者是 schema 遵从度问题、能归位就归位）。
+        # 混着报会让人去调错东西。
+        logger.warning(
+            "compare.rows_unbound",
+            dropped=dropped,
+            fabricated_id=fabricated,
+            missing_id=len(unbound),
+            hint="id 缺失可归位则归位；归不了位才丢，绝不把内容挂到候选集之外的论文上",
+        )
+    return bound, dropped
 
 
 async def compare_node(state: ResearchState) -> dict:
@@ -358,15 +482,8 @@ async def compare_node(state: ResearchState) -> dict:
             "error", node="compare", code="extract_failed", message=str(exc)[:200], recoverable=True
         )
 
-    # 模型报的行按 arxiv_id 归位；**不在本次结果里的 id 直接丢弃**（反幻觉，同 read/verify）。
-    llm_rows: dict[str, ComparisonRow] = {}
-    dropped = 0
-    for row in (parsed.rows if parsed else []):
-        if row.arxiv_id not in allowed:
-            dropped += 1
-            logger.warning("compare.hallucinated_paper", arxiv_id=row.arxiv_id)
-            continue
-        llm_rows[row.arxiv_id] = row
+    # 模型报的行按 arxiv_id 归位；**归不到本次候选集里的行才丢弃**（反幻觉，同 read/verify）。
+    llm_rows, dropped = _bind_rows(parsed.rows if parsed else [], papers)
 
     rows = [_row_from(p, llm_rows.get(p.get("arxiv_id", "")), meta_by_id.get(p.get("arxiv_id", ""), {}))
             for p in papers]
