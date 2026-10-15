@@ -4,7 +4,7 @@
 必须等就绪再开浏览器，否则用户看到的是 502 而不是界面。
 
 两个子进程**共用当前控制台窗口**，所以关掉这个窗口 = 两个服务一起停；
-额外注册清理钩子，保证 Ctrl+C 时不留下占着 8000 端口的僵尸进程。
+额外注册清理钩子，保证 Ctrl+C 时不留下占着服务端口的僵尸进程。
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -21,7 +22,49 @@ import webbrowser
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-API_PORT = 8000
+
+
+def _resolve_api_port(default: int = 8000) -> int:
+    """从环境变量 / `.env` 里取 API_PORT，取不到就用 8000。
+
+    ★ 为什么要在这里手写一个小解析而不是 `from app.core.config import get_settings`：
+    启动器必须在"依赖还没装"的状态下也能跑 —— import app.* 会立刻因为
+    FastAPI/Pydantic 缺失而崩掉，连"请先装依赖"的提示都发不出来。
+    而 Settings 里的 api_port 此前没有任何消费者：用户改了 .env 的 API_PORT，
+    启动器照样在 8000 上拉 uvicorn，配置静默无效。
+    优先级照搬 pydantic-settings 的语义：真实环境变量 > .env > 代码默认。
+    """
+    raw = os.environ.get("API_PORT", "").strip()
+    if not raw:
+        env_file = ROOT / ".env"
+        try:
+            for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                if key.strip() == "API_PORT":
+                    raw = value.strip().strip("\"'")
+                    break
+        except OSError:  # .env 读不了（被占用/编码怪异）不该挡住启动
+            raw = ""
+    if not raw:
+        return default
+    # 回显用户填的值前先压成 ASCII：控制台此刻还是 GBK（main() 里才 reconfigure），
+    # 把 .env 里的怪字符原样 print 可能直接抛 UnicodeEncodeError，启动器反而先崩。
+    shown = raw.encode("ascii", "replace").decode("ascii")
+    try:
+        port = int(raw)
+    except ValueError:
+        print(f"[!] .env/环境里的 API_PORT={shown!r} 不是合法端口，改用默认 {default}。")
+        return default
+    if not 1 <= port <= 65535:
+        print(f"[!] API_PORT={port} 超出合法范围，改用默认 {default}。")
+        return default
+    return port
+
+
+API_PORT = _resolve_api_port()
 UI_PORT = 8501
 API_URL = f"http://127.0.0.1:{API_PORT}"
 UI_URL = f"http://127.0.0.1:{UI_PORT}"
@@ -66,14 +109,56 @@ def _web_source_files() -> list[Path]:
     return files
 
 
+def _missing_bundled_assets() -> list[str]:
+    """index.html 里引用了、但磁盘上并不存在的 `/assets/...` 文件列表。
+
+    ★ 为什么光比时间戳不够：mtime 只能回答"产物旧了"，答不出"产物缺了"。
+    index.html 还在、assets/ 却被删了或第一次 build 没跑出来时，
+    时间戳检查一切正常，用户得到的却是白屏。
+    """
+    try:
+        html = WEB_INDEX.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    missing: list[str] = []
+    seen: set[str] = set()
+    # 引用形态：<script type="module" src="/assets/index-xxxx.js"></script>、link href 等
+    for ref in re.findall(r"""["'](/assets/[^"'\s]+)["']""", html):
+        ref = ref.split("?", 1)[0].split("#", 1)[0]
+        if ref in seen:
+            continue
+        seen.add(ref)
+        if not (WEB_INDEX.parent / ref.lstrip("/")).is_file():
+            missing.append(ref)
+    return missing
+
+
 def _warn_if_web_bundle_is_stale() -> bool:
-    """构建产物比源码旧就明确说出来 —— "改了界面但看到的还是旧的"几乎总是这个原因。
+    """构建产物比源码旧、或 index.html 引用的文件缺了就明确说出来 ——
+    "改了界面但看到的还是旧的/干脆白屏"几乎总是这两个原因。
 
     这里只警告不自动构建：`npm run build` 要几十秒、还要 Node，双击启动的人
-    未必装得起，替他默默跑掉反而更难解释。返回 True 表示产物是新的。
+    未必装得起，替他默默跑掉反而更难解释。返回 True 表示产物是新的且完整。
     """
     if not WEB_INDEX.is_file():
         return False  # 没构建过：走的是 Streamlit 退回路径，那条路自己会说明
+
+    missing = _missing_bundled_assets()
+    if missing:
+        print()
+        print("[X] web/dist/index.html 引用了下面这些构建产物，但文件并不存在：")
+        for ref in missing[:8]:
+            print(f"      {ref}")
+        if len(missing) > 8:
+            print(f"      …… 共 {len(missing)} 个")
+        print("    多半是 assets/ 被删了、或上一次 npm run build 中断了。")
+        print("    不修的话浏览器会对 /assets/* 收到 404，界面一片空白。")
+        print("    修复（需要本机有 Node 18+）：")
+        print("      cd web && npm install && npm run build")
+        print("    构建完**必须重启后端**（关掉启动窗口再双击一次）：")
+        print("    /assets 的挂载是后端启动那一刻决定的，第一次构建出的 assets/ 不重启不认。")
+        return False
+
     try:
         built = WEB_INDEX.stat().st_mtime
     except OSError:
@@ -85,8 +170,11 @@ def _warn_if_web_bundle_is_stale() -> bool:
     print("[!] web/dist 里的前端构建产物比 web/src 旧 —— 界面上看不到刚加的功能是正常的。")
     print("    重新构建（需要本机有 Node 18+）：")
     print("      cd web && npm install && npm run build")
-    print("    构建完**刷新浏览器**就能看到新版界面：静态文件是每次请求现读盘的，不用重启。")
-    print("    只有改了 Python 侧（app/）才需要关掉启动窗口再双击一次。")
+    print("    构建完要不要重启后端，取决于后端启动那一刻 assets 挂载好了没有：")
+    print("    - web/dist/assets/ 当时就存在：刷新浏览器即可，静态文件是每次请求现读盘的；")
+    print("    - 当时 assets/ 不存在（第一次构建）：必须关掉启动窗口再双击一次 ——")
+    print("      /assets 挂载在启动时决定，不重启的话浏览器只拿到 404，界面白屏。")
+    print("    改了 Python 侧（app/）的，一律要重启。")
     return False
 
 
@@ -229,8 +317,9 @@ def main() -> int:
         print(f"[i] 检测到 PaperPilot 已经在运行，直接为你打开 {target_url} 。")
         print("    想重启请先关掉那个启动窗口。")
         if use_web_ui and not bundle_fresh:
-            print("    而且上面说了：构建产物比源码旧。所以这次打开的界面**确实是上一版**，")
-            print("    先按上面的命令构建、再刷新浏览器，功能才会出现。")
+            print("    而且上面说了：构建产物要么比源码旧、要么 index.html 引用的文件缺失，")
+            print("    所以这次打开的界面**确实是上一版或干脆白屏**。")
+            print("    先按上面的命令构建；提示里说了要重启后端的，别只刷新浏览器。")
         webbrowser.open(target_url)
         time.sleep(1.0)
         return 0
@@ -244,8 +333,8 @@ def main() -> int:
     if not _wait_http(f"{API_URL}/healthz", deadline=180):
         code = api_proc.poll()
         print(f"[X] 后端没能在 180 秒内就绪（退出码 {code}）。")
-        print("    常见原因：依赖没装全，或 8000 端口被别的程序占着。")
-        print("    排查：  先只起后端看报错 →  python -m uvicorn app.main:app --port 8000")
+        print(f"    常见原因：依赖没装全，或 {API_PORT} 端口被别的程序占着。")
+        print(f"    排查：  先只起后端看报错 →  python -m uvicorn app.main:app --port {API_PORT}")
         _stop_all()
         return 1
     print(f"      ✓ http://127.0.0.1:{API_PORT}  文档 /docs")

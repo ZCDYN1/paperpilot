@@ -89,7 +89,7 @@ async def lifespan(app: FastAPI):
     logger.info("paperpilot.stopped")
 
 
-def _mount_web_ui(app: FastAPI) -> bool:
+def _mount_web_ui(app: FastAPI, dist_dir: Path | None = None) -> bool:
     """把 `web/dist` 挂成单端口前端；没构建过就安静地跳过。
 
     ★ 为什么要挂在这里而不是让前端单独跑一个 Node 服务：
@@ -99,21 +99,36 @@ def _mount_web_ui(app: FastAPI) -> bool:
 
     路由顺序是关键：本函数在 `include_router` **之后**调用，所以 `/api/v1/*`、
     `/healthz`、`/docs` 都会先匹配到；兜底路由再把其余 GET 交给 SPA。
+
+    `dist_dir` 参数只为测试构造"assets 缺失"之类的场景，生产走默认值。
     """
-    dist = Path(__file__).resolve().parents[1] / "web" / "dist"
+    dist = dist_dir if dist_dir is not None else Path(__file__).resolve().parents[1] / "web" / "dist"
     index = dist / "index.html"
     if not index.is_file():
         return False
 
+    # ★ 为什么 assets/ 前缀必须在兜底里明确 404：
+    # index.html 在、assets 被删或首次构建没跑出来时，若让它落到兜底，
+    # 浏览器拿到的是 200 + HTML 却要以 module 执行 —— 它会**静默拒绝**，
+    # 用户只见白屏且控制台一行报错都没有，网络面板里也全是绿勾（实测踩过）。
+    # 返回 404 才能一眼认出"构建产物没跟上"。
     assets = dist / "assets"
     if assets.is_dir():
         app.mount("/assets", StaticFiles(directory=str(assets)), name="web-assets")
+    else:
+        # /assets 挂载在启动时决定，事后补构建不会自动挂上，所以这里就喊出来
+        logger.warning(
+            "paperpilot.web_assets_missing",
+            hint="web/dist/index.html 存在但 web/dist/assets/ 缺失 —— 页面会白屏。"
+            "重新构建： cd web && npm run build；构建完必须重启后端（/assets 挂载在启动时决定）。",
+        )
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa(full_path: str) -> FileResponse:
         # 兜底不能吞掉 API：否则拼错的接口路径会返回 200 + 一坨 HTML，
         # 前端 `resp.json()` 报"解析失败"，真实原因（404）被彻底盖住。
-        if full_path.startswith(("api/", "docs", "redoc")) or full_path == "healthz":
+        # assets/ 也走同一条规则，理由见上面 web_assets_missing 处的注释。
+        if full_path.startswith(("api/", "assets/", "docs", "redoc")) or full_path == "healthz":
             raise HTTPException(status_code=404, detail="not found")
         return FileResponse(index)
 
@@ -144,7 +159,9 @@ def create_app() -> FastAPI:
 
     # 前端挂载必须排在所有 API 路由之后（见 _mount_web_ui 的路由顺序说明）
     if _mount_web_ui(app):
-        logger.info("paperpilot.web_ui_mounted", hint="打开 http://127.0.0.1:8000 即为 React 控制台")
+        # 用 settings.api_port 而不是写死 8000：用户改 .env 的 API_PORT 后，
+        # 提示里的端口必须跟着变，否则把人引到一个没服务的端口上。
+        logger.info("paperpilot.web_ui_mounted", hint=f"打开 http://127.0.0.1:{settings.api_port} 即为 React 控制台")
     else:
         logger.info(
             "paperpilot.web_ui_missing",
