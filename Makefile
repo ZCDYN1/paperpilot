@@ -1,6 +1,11 @@
 # PaperPilot — 常用命令速查
 # 说明：Windows 上如果没有 make，可直接照抄下面的命令手动执行（或用 scripts/ 下的脚本）。
 
+# 端口只有一条真相源：`.env` 的 API_PORT 由启动器（scripts/launch.py / 双击的 .bat）读取，
+# 而 `make dev-api` 这类手敲 uvicorn 的路径不经过它 —— 命令行 --port 会盖掉配置。
+# 所以这里留一个可覆盖的变量：`API_PORT=9000 make dev-api`，别让它和 .env 各说各话。
+API_PORT ?= 8000
+
 .PHONY: help install install-local dev-api dev-ui web-install web-dev web-build web-typecheck test lint fmt typecheck ablate eval eval-ablation eval-ragas index sample zerokey spotcheck spotcheck-stats docker-build docker-up docker-up-legacy docker-down clean
 
 help:
@@ -38,7 +43,7 @@ install-local:
 	pip install -e ".[local]"
 
 dev-api:
-	uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+	uvicorn app.main:app --host 0.0.0.0 --port $(API_PORT) --reload
 
 dev-ui:
 	streamlit run ui/streamlit_app.py
@@ -100,7 +105,7 @@ sample:
 # 用它跑出来的任何指标都不能当能力证据（详见 README「引用准确率」口径说明）。
 zerokey:
 	LLM_PROVIDER=mock EMBEDDING_PROVIDER=mock RERANK_ENABLED=false INGEST_ENABLED=false python scripts/load_sample_data.py --force
-	LLM_PROVIDER=mock EMBEDDING_PROVIDER=mock RERANK_ENABLED=false INGEST_ENABLED=false uvicorn app.main:app --host 127.0.0.1 --port 8000
+	LLM_PROVIDER=mock EMBEDDING_PROVIDER=mock RERANK_ENABLED=false INGEST_ENABLED=false uvicorn app.main:app --host 127.0.0.1 --port $(API_PORT)
 
 # spotcheck：架构文档 §12 要求的人工口径。导出 CSV 后在 human_verdict 列
 # 逐条填 supported / unsupported / ambiguous，再用 spotcheck-stats 出一致率。

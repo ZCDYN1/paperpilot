@@ -97,6 +97,11 @@ cd web && npm ci && npm run build && cd ..
 uvicorn app.main:app --reload    # 打开 http://127.0.0.1:8000 就是 React 控制台
 ```
 
+> ⚠️ 端口的真相源有两条，别混：`.env` 里的 `API_PORT` 只有**启动器**（双击 `启动PaperPilot.bat` /
+> `python scripts/launch.py`）会读；手敲 `uvicorn app.main:app` 时命令行赢，默认就是 8000。
+> 要换端口就走启动器，或显式 `uvicorn app.main:app --port 9000`（`make dev-api` 支持
+> `API_PORT=9000 make dev-api`）。
+
 开发前端时不必每次重新构建：`cd web && npm run dev` 起 :5173（Vite 代理到 :8000）。
 `web/.env.development` 默认 `VITE_USE_MOCK=1`，即**没有 Python 后端也能浏览全部界面**；
 连真后端调试时在 `web/.env.local` 里写 `VITE_USE_MOCK=0`。
