@@ -277,6 +277,53 @@ async def _record_plan_edit(run_id: str, diff: dict) -> None:
         logger.warning("research.plan_edit_persist_failed", run_id=run_id, error=str(exc)[:200])
 
 
+# --------------------------------------------------------------------------- HITL 等待时长
+# `research_runs.started_at ~ ended_at` 是**墙钟**，而 HITL 把一次研究劈成了两段：
+# 中间那段是"人在看拆解、在想怎么改"，可以是一分钟也可以是通宵。直接相减会得到一个
+# 自称"运行耗时"、实际混合了人类思考时间的数字 —— 导出报告里那一行就是它。
+# 所以中断时打一个时间点、续跑时把它结算成累计秒数，两份都写进 `langgraph_state`
+# （沿用同一份"不动表结构"的埋点载体，见上面 PLAN_EDIT_FLAG 的注释）。
+AWAITING_SINCE = "awaiting_since"
+HITL_WAIT_SECONDS = "hitl_wait_seconds"
+
+
+async def _mutate_run_state(run_id: str, apply) -> None:
+    """对 `langgraph_state` 做一次读-改-写。
+
+    JSON 列必须**整体赋新值**，原地改字典 SQLAlchemy 看不到差异（同 `_persist_plan_edit_metric`）。
+    埋点失败不该影响这次研究，所以这里吞异常只记日志。
+    """
+    try:
+        async with session_scope() as db:
+            run = await db.get(ResearchRun, run_id)
+            if run is None:
+                return
+            state = dict(run.langgraph_state or {})
+            apply(state)
+            run.langgraph_state = state
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("research.hitl_wait_tracking_failed", run_id=run_id, error=str(exc)[:200])
+
+
+async def _open_awaiting_window(run_id: str) -> None:
+    await _mutate_run_state(run_id, lambda s: s.__setitem__(AWAITING_SINCE, datetime.now(UTC).isoformat()))
+
+
+async def _close_awaiting_window(run_id: str) -> None:
+    def apply(state: dict) -> None:
+        since = state.pop(AWAITING_SINCE, None)
+        if not since:
+            return  # 没在中断点停过（或已被结算过）
+        try:
+            waited = (datetime.now(UTC) - datetime.fromisoformat(since)).total_seconds()
+        except ValueError:
+            return
+        if waited > 0:
+            state[HITL_WAIT_SECONDS] = round(float(state.get(HITL_WAIT_SECONDS) or 0) + waited, 1)
+
+    await _mutate_run_state(run_id, apply)
+
+
 # --------------------------------------------------------------------------- 主接口
 @router.post("/stream", summary="SSE 流式研究（核心接口）")
 async def research_stream(req: ResearchRequest) -> StreamingResponse:
@@ -313,6 +360,7 @@ async def research_stream(req: ResearchRequest) -> StreamingResponse:
                     if not interrupted_emitted and frame.startswith("event: interrupted"):
                         interrupted_emitted = True
                         await _update_run_status(run_id, AWAITING_INPUT_STATUS)
+                        await _open_awaiting_window(run_id)
 
             # 状态取自发射器：停在 HITL 中断的 run 写 `awaiting_input` 而不是 `completed`。
             # 以前这里无条件写 completed，于是"正在等用户确认子问题"的 run
@@ -429,6 +477,8 @@ async def research_resume(run_id: str, body: ResumeRequest | None = None) -> Str
     # ★ 状态门禁：放在返回 StreamingResponse **之前** —— 流一旦开始就只能靠 SSE error
     # 事件报"不许续跑"，客户端拿不到状态码。被拒的 resume 一个 token 也不该烧。
     await _ensure_resumable(run_id)
+    # 用户点下"继续"的那一刻，等待窗口就结算掉：这段人类时间不该进导出的"耗时"。
+    await _close_awaiting_window(run_id)
     emitter = SSEEmitter(run_id)
 
     async def event_gen():

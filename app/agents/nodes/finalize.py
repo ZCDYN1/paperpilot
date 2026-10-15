@@ -108,7 +108,10 @@ async def _persist(state: ResearchState, usage: dict[str, int], by_node: dict | 
         # 不接住的话"进程在两段之间死掉"就会把信号整个吞掉，而 §8 可用率只看跑完的 run。
         # 流结束后生产方会用权威值再覆盖一次，这里带旧值不会让它变陈旧。
         if isinstance(run, ResearchRun) and isinstance(run.langgraph_state, dict):
-            for _k in ("plan_edited", "plan_edit_detail"):
+            # `hitl_wait_seconds` 同 `plan_edited` 一个道理：它由 API 层在**中断点与续跑入口**
+            # 写下，本次覆盖正夹在两次写之间。丢了它，导出报告的"耗时"就退回成墙钟原值
+            # —— 把用户改子问题那几分钟也算成研究运行时长。
+            for _k in ("plan_edited", "plan_edit_detail", "hitl_wait_seconds", "awaiting_since"):
                 if _k in run.langgraph_state:
                     summary[_k] = run.langgraph_state[_k]
         if run is None:

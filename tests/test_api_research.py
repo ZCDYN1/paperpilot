@@ -24,6 +24,8 @@ import json
 import pytest
 
 from app.core.config import get_settings
+from app.db.models import ResearchRun
+from app.db.session import session_scope
 from tests.api_support import (
     STREAM_URL,
     api_client,
@@ -623,3 +625,27 @@ async def test_resume_works_after_client_aborts_at_the_interrupt_point(client):
 
     resumed = (await client.post(f"/api/v1/research/{run_id}/resume", json={})).text
     assert first_data(resumed, "done")["status"] == "ok"
+
+
+async def test_hitl_wait_is_tracked_and_excluded_from_exported_duration(client):
+    """导出的"耗时"必须扣掉用户审阅拆解的时间，否则报的是墙钟而不是运行时长。"""
+    body = (await client.post(STREAM_URL, json={"question": "重排对延迟的代价", "top_k": 3})).text
+    run_id = first_data(body, "run_started")["run_id"]
+
+    async with session_scope() as db:
+        state = dict((await db.get(ResearchRun, run_id)).langgraph_state or {})
+    assert state.get("awaiting_since"), "中断时没打等待起点，耗时就会把人工时间一起算进去"
+
+    resumed = (await client.post(f"/api/v1/research/{run_id}/resume", json={})).text
+    assert "final_report" in event_types(resumed)
+
+    async with session_scope() as db:
+        run = await db.get(ResearchRun, run_id)
+        state = dict(run.langgraph_state or {})
+    assert "awaiting_since" not in state, "续跑后没结算，下一次统计会重复计入同一段等待"
+    assert isinstance(state.get("hitl_wait_seconds"), (int, float))
+    assert run.ended_at is not None
+
+    md = (await client.get(f"/api/v1/research/{run_id}/export.md")).text
+    assert "耗时：" in md and "未正常收尾" not in md
+    # 等待时长具体几秒取决于机器速度，数值断言放在 test_export_markdown.py 里做确定性校验

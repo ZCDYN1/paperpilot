@@ -159,9 +159,12 @@ def create_app() -> FastAPI:
 
     # 前端挂载必须排在所有 API 路由之后（见 _mount_web_ui 的路由顺序说明）
     if _mount_web_ui(app):
-        # 用 settings.api_port 而不是写死 8000：用户改 .env 的 API_PORT 后，
-        # 提示里的端口必须跟着变，否则把人引到一个没服务的端口上。
-        logger.info("paperpilot.web_ui_mounted", hint=f"打开 http://127.0.0.1:{settings.api_port} 即为 React 控制台")
+        # 这里**不报具体端口号**：应用自己并不知道 uvicorn 实际绑了哪个口。
+        # `uvicorn app.main:app --port 8000` 会盖掉 `.env` 的 API_PORT，此时打印
+        # `settings.api_port` 等于把人引到一个没服务的地址 —— 比不写更容易坑人。
+        # 真实监听地址由 uvicorn 自己那行 "Uvicorn running on http://…" 给出，
+        # 而 `python -m app.main` / `启动PaperPilot.bat` 这两条路径才是照配置走的。
+        logger.info("paperpilot.web_ui_mounted", hint="React 控制台挂在同一端口的根路径 /，端口见 uvicorn 的 Uvicorn running 一行")
     else:
         logger.info(
             "paperpilot.web_ui_missing",

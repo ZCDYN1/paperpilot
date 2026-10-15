@@ -290,3 +290,23 @@ async def test_missing_parts_render_blanks_not_fabricated(temp_db):
         assert section not in md
     assert "未找到原文支撑" not in md
     assert "> 本文由 AI 生成，引用请以原文为准。" in md
+
+
+async def test_hitl_wait_seconds_are_subtracted_from_the_reported_duration(temp_db):
+    """`started_at~ended_at` 是墙钟，HITL 等待必须从中扣掉，否则"耗时"是运行+人工的混合值。"""
+    run_id = await _seed_full_run(temp_db)
+    async with temp_db() as s:
+        run = await s.get(ResearchRun, run_id)
+        # 墙钟 2 分 51 秒，其中 2 分 05 秒是用户在改子问题
+        run.langgraph_state = {"hitl_wait_seconds": 125.0}
+
+    md = await render_run_markdown(run_id)
+    assert "已扣除等待用户确认拆解的 2 分 5 秒" in md
+    assert "耗时：0 分 46 秒" in md, "报告里的耗时仍等于墙钟 —— 扣除没生效"
+
+
+async def test_runs_without_hitl_tracking_report_plain_wall_clock(temp_db):
+    """没有等待记录（没走过 HITL，或历史数据）时不该凭空加一句"已扣除"。"""
+    run_id = await _seed_full_run(temp_db)
+    md = await render_run_markdown(run_id)
+    assert "耗时：2 分 51 秒" in md and "已扣除" not in md
