@@ -119,6 +119,37 @@ def _reference_list(citations: list[Evidence], titles: dict[str, str]) -> tuple[
     return "\n".join(lines), order
 
 
+#: 由代码负责追加的小节标题。模型被 prompt 要求也写这些节（`prompts/writer.md` §2/§4），
+#: 于是正文里先来一份、代码再补一份 → 报告里出现两遍「⚠️ 未找到原文支撑的结论」
+#: 和两遍「参考文献」。页脚早就做了去重，这两节是漏网。
+#: 保留代码那一份：它的编号与 `citations` 表一致，界面上点 [n] 才跳得对；
+#: 模型自己写的那份编号是它数出来的，正是本项目记录过的"错位引用"来源。
+_CODE_OWNED_HEADINGS: tuple[str, ...] = (
+    "## ⚠️ 未找到原文支撑的结论",
+    "## ✅ 引用校验结果",
+    "## 参考文献",
+)
+
+
+def _strip_code_owned_sections(body: str) -> str:
+    """把模型自己写的"代码管辖小节"整段摘掉（从标题行到下一个 `## ` 之前）。"""
+    lines = body.split("\n")
+    kept: list[str] = []
+    skipping = False
+    removed: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            skipping = stripped in _CODE_OWNED_HEADINGS
+            if skipping:
+                removed.append(stripped[3:].strip())
+        if not skipping:
+            kept.append(line)
+    if removed:
+        logger.info("write.model_owned_section_replaced", headings=sorted(set(removed)))
+    return "\n".join(kept).strip()
+
+
 def _coverage_notice(state: ResearchState) -> str:
     """语料不足时的显式声明块（空串表示语料充足）。"""
     if state.get("corpus_ready", True):
@@ -197,6 +228,8 @@ async def write_node(state: ResearchState) -> dict:
         if claim and claim not in _listed:
             unsupported.append(c.get("claim"))
             _listed.add(claim)
+    # 模型自己写的"代码管辖小节"先摘掉，再由下面的代码补一份权威版本
+    body = _strip_code_owned_sections(body)
     sections: list[str] = [_coverage_notice(state), body.strip()]
 
     # ⚠️ 未支撑论断一节：**由代码追加**，模型删不掉（产品定义 §4 产出物 D）

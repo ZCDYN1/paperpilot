@@ -232,3 +232,52 @@ def test_request_switches_are_forwarded_into_state():
     )
     assert state["top_k"] == 3
     assert state["rerank"] is False
+
+
+# ---------------------------------------------------------------------------
+# 2) 模型照 prompt 写了「参考文献」/「⚠️ 未支撑」时，报告里不能出现第二份
+# ---------------------------------------------------------------------------
+async def test_model_written_code_owned_sections_are_not_duplicated(capture_writer):
+    """`prompts/writer.md` §2/§4 明确要求模型写这两节，代码又会补一份权威版本。
+
+    真实后果（跑一次研究就能看到）：正文里 `## ⚠️ 未找到原文支撑的结论` 与
+    `## 参考文献` 各出现两遍，内容还不完全一样 —— 读者无法判断哪一份是真的，
+    而界面上点 [n] 跳的是代码这份的编号。页脚早就去重了，这两节是漏网。
+    """
+    capture_writer["body"] = (
+        "综述正文。[1]\n\n"
+        "## ⚠️ 未找到原文支撑的结论\n- \"模型自己列的一条\"\n\n"
+        "## 参考文献\n\n[1] 模型自己数的条目 — arXiv:2501.00001\n"
+    )
+
+    draft = (await writer.write_node(_STATE))["draft"]
+
+    assert draft.count("## 参考文献") == 1, "参考文献出现了两遍"
+    assert draft.count("## ⚠️ 未找到原文支撑的结论") == 1, "未支撑小节出现了两遍"
+    # 留下的是代码那份（编号与 citations 表同源），模型那份必须整段消失
+    assert "模型自己数的条目" not in draft
+    assert "模型自己列的一条" not in draft
+    assert "结论乙：被判无支撑" in draft
+
+
+async def test_stripping_a_code_owned_section_does_not_swallow_the_rest(capture_writer):
+    """摘除只到下一个 `## ` 为止：模型写在它后面的正常小节不能被连带吃掉。"""
+    capture_writer["body"] = (
+        "综述正文。[1]\n\n"
+        "## 参考文献\n\n[1] 模型自己数的条目\n\n"
+        "## 我们的下一步计划\n\n这段必须留着。\n"
+    )
+
+    draft = (await writer.write_node(_STATE))["draft"]
+
+    assert "这段必须留着。" in draft, "摘除范围越界，吃掉了模型写的后续小节"
+    assert "模型自己数的条目" not in draft
+    assert draft.count("## 参考文献") == 1
+
+
+async def test_body_without_those_sections_is_untouched(capture_writer):
+    """模型没写时不产生任何摘除动作，也不该凭空报错。"""
+    capture_writer["body"] = "只有正文。[1]"
+    draft = (await writer.write_node(_STATE))["draft"]
+    assert "只有正文。[1]" in draft
+    assert draft.count("## 参考文献") == 1
