@@ -202,39 +202,51 @@ jobs:
           cat /tmp/uvicorn-8020.log
           exit 1
 
-      - name: 契约测试（vitest · 打真实后端 · 禁止 skip）
-        # CI=true 会触发 spec 里的开关：后端不可达时直接 fail 而非 skip。
-        # 跑完再用 json reporter 复核：8 条必须全部执行、skipped 必须为 0，
+      - name: 契约 + 流式端到端测试（vitest · 打真实后端 · 禁止 skip）
+        # CI=true 会触发两个 spec 文件里的开关：后端不可达时直接 fail 而非 skip
+        # （contract.spec.ts 与 stream.e2e.spec.ts 用的是同一套判据）。
+        # 跑完再用 json reporter 复核：26 条必须全部执行、skipped 必须为 0，
         # 否则「后端没起来 → 全跳 → 绿」这种假保护就无从藏身。
+        # 另外单独钉一条：stream.e2e.spec.ts 必须出现在结果里 ——
+        # 这条盯的是 token 事件的真实发送点，前一轮它就是被"默认 skip"藏起来的。
         env:
           PAPERPILOT_API: http://127.0.0.1:8020
           CI: "true"
         working-directory: web
         run: |
           npm run test -- --reporter=default --reporter=json --outputFile=/tmp/contract.json
-          echo "--- 复核：8 条契约测试必须全部执行、不允许 skip ---"
+          echo "--- 复核：契约测试必须全部执行、skipped 必须为 0、流式 e2e 必须在结果里 ---"
           node <<'EOF'
           const fs = require("fs");
           const j = JSON.parse(fs.readFileSync("/tmp/contract.json", "utf8"));
           const acc = [];
+          const files = [];
           (function walk(s) {
             for (const f of s || []) {
               for (const a of f.assertionResults || []) acc.push(a.status);
               if (f.testResults) walk(f.testResults);
+              else files.push(String(f.name || "").replace(/\\/g, "/"));
             }
           })(j.testResults);
           const c = {};
           for (const s of acc) c[s] = (c[s] || 0) + 1;
           const skipped = (c.skipped || 0) + (c.pending || 0) + (c.todo || 0);
           const passed = c.passed || 0;
-          console.log("contract 用例状态:", JSON.stringify(c));
+          console.log("用例状态:", JSON.stringify(c));
           if (skipped > 0) {
-            console.error("FAIL: 有 " + skipped + " 条契约测试被 skip —— CI 里必须真的执行。");
+            console.error("FAIL: 有 " + skipped + " 条测试被 skip —— CI 里必须真的执行。");
             process.exit(1);
           }
-          if (passed < 8) {
-            console.error("FAIL: 期望 8 条契约测试全部执行，passed=" + passed);
+          if (passed < 26) {
+            console.error(
+              "FAIL: 期望至少 26 条（契约 8 + 流式 e2e 1 + 前端逻辑 11 + mock 重放 6），passed=" + passed,
+            );
             process.exit(1);
           }
-          console.log("OK: " + passed + " 条契约测试已执行，无 skip。");
+          if (!files.some((n) => n.includes("stream.e2e.spec.ts"))) {
+            console.error("FAIL: stream.e2e.spec.ts 不在测试结果里（被 skip、改名或删掉了）。");
+            console.error("已执行的文件:", JSON.stringify(files, null, 2));
+            process.exit(1);
+          }
+          console.log("OK: " + passed + " 条测试已执行，无 skip，流式 e2e 在内。");
           EOF

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { api } from "@/api/client";
 import type { SSEEvent } from "@/api/events";
@@ -8,6 +8,7 @@ import { PageHeader } from "@/components/ui/PageHeader";
 import { StatCard } from "@/components/ui/StatCard";
 import { Stagger } from "@/components/ui/Stagger";
 import { Panel } from "@/components/ui/Panel";
+import { MarkdownBlock } from "@/components/ui/MarkdownBlock";
 import { NeonButton } from "@/components/ui/NeonButton";
 import { Tag } from "@/components/ui/Tag";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -446,7 +447,103 @@ export function ConsolePage() {
           />
         </Panel>
       </div>
+
+      <StreamPreview
+        streamed={run.streamed}
+        finalReport={run.finalReport}
+        previewVoid={run.previewVoid}
+        voidReason={run.error}
+        running={running}
+      />
     </div>
+  );
+}
+
+/* ============================================================ 流式预览区
+   权威边界（架构 §token 事件实现 / useResearchStream）：
+   - `streamed` 只有模型生成的正文；⚠️ 未支撑一节 / 参考文献 / 页脚是代码追加的、不进流，
+     所以它**永远不等于** `final_report.markdown` —— 预览必须标成预览，别让人当最终报告。
+   - `node_started(write)` 晚于第一个 token（updates 通道固有顺序），
+     所以这里不看任何事件，只看 `streamed` 本身有没有内容。
+   - `previewVoid` 为真时 reducer 已经清空 `streamed` **并把 token 事件一起摘掉**
+     （时间线那边也是这段预览的展示面，只清这一边等于没清），界面上给作废状态。
+   ★ 性能：流式期 token ~100ms 批量落地一次，此时**绝不跑 markdown 解析**，
+     纯文本 `<pre>` 渲染；只有 `finalReport`（权威、一次性到达）才用 `MarkdownBlock`。 */
+
+type StreamPreviewProps = {
+  streamed: string;
+  finalReport: string | null;
+  previewVoid: boolean;
+  /** reducer 记下的错误原文（`code: message`），作废时给用户一个可查的原因 */
+  voidReason: string | null;
+  running: boolean;
+};
+
+function StreamPreview({ streamed, finalReport, previewVoid, voidReason, running }: StreamPreviewProps) {
+  const hasFinal = finalReport !== null;
+  const boxRef = useRef<HTMLDivElement>(null);
+
+  // 预览期跟随到最新 token 落点（真实增量驱动，不是定时器假动画）
+  useEffect(() => {
+    if (hasFinal || previewVoid) return;
+    const el = boxRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [streamed, hasFinal, previewVoid]);
+
+  // 没有任何值得看的东西（没跑过、没预览、没作废、没报告）就不挂面板
+  if (!hasFinal && !previewVoid && streamed.length === 0 && !running) return null;
+
+  if (hasFinal) {
+    return (
+      <Panel
+        title="最终研究报告"
+        subtitle="final_report 事件的权威正文（含 ⚠️ 未支撑一节 / 参考文献 / 页脚，这些不在流里）"
+        extra={<span className="font-mono text-xs text-ink-faint">{finalReport.length.toLocaleString()} 字符</span>}
+        bodyClassName="max-h-[640px] overflow-y-auto"
+      >
+        <MarkdownBlock source={finalReport} />
+      </Panel>
+    );
+  }
+
+  return (
+    <Panel
+      title="流式预览"
+      subtitle="仅模型生成正文 · 不含 ⚠️ 未支撑一节 / 参考文献 / 页脚，非最终报告；权威内容以 final_report 为准"
+      extra={
+        <span className="flex items-center gap-2 font-mono text-xs text-ink-faint">
+          {running && <span className="text-neon-cyan">● 流式中</span>}
+          <span>{streamed.length.toLocaleString()} 字符</span>
+        </span>
+      }
+      bodyClassName="max-h-[480px] overflow-y-auto"
+    >
+      {previewVoid ? (
+        <div className="rounded-lg border border-neon-amber/40 bg-neon-amber/10 px-4 py-3 text-sm leading-6 text-neon-amber">
+          <p>
+            这段流式预览已作废，界面上不留半截文本 —— 权威内容只认 <code className="font-mono">final_report</code>。
+          </p>
+          <p className="mt-1 text-xs leading-5 text-ink-soft">
+            作废有两种来源：后端声明 <code className="font-mono">token_stream_aborted</code>
+            （吐过字又失败，重试轮按「宁少流、不重流」不再重流），或这次运行终止于 error 而报告始终没到。
+            {voidReason ? <span className="mt-1 block break-all">后端原文：{voidReason}</span> : null}
+          </p>
+        </div>
+      ) : (
+        <div ref={boxRef} className="max-h-full overflow-y-auto">
+          {streamed.length === 0 ? (
+            <p className="text-xs leading-6 text-ink-faint">
+              等待 writer 的第一批 token…（流式不依赖 node_started(write) 到达，没有它预览照样会动）
+            </p>
+          ) : (
+            <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-ink-soft">
+              {streamed}
+              {running && <span className="ml-0.5 inline-block animate-pulse text-neon-cyan">▍</span>}
+            </pre>
+          )}
+        </div>
+      )}
+    </Panel>
   );
 }
 

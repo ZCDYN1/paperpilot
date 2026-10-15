@@ -325,16 +325,26 @@ function EventRow({ ev, open, onToggle }: { ev: SSEEvent; open: boolean; onToggl
 }
 
 function TokenRow({ node, text, chunks, streaming }: { node: string; text: string; chunks: number; streaming: boolean }) {
+  // 批量提交后一行可合并几十段：限长时流式行截**尾部**（最新内容），历史行截头部，
+  // 否则用户盯着一行永远看不到在动的那半截。400 ≈ max-h-28 的可视行数，再多就被行高裁掉了
+  const shown =
+    text.length <= 600
+      ? text
+      : streaming
+        ? `…${text.slice(-400)}`
+        : clip(text, 600);
   return (
     <motion.li initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="relative flex items-start">
       <NodeIcon type="token" tone="cyan" />
       <div className="min-w-0 flex-1 rounded-md px-2 py-1">
         <div className="flex items-baseline gap-2">
           <span className="font-mono text-[10px] uppercase tracking-wider text-neon-cyan/70">token · {node}</span>
-          <span className="font-mono text-[10px] text-ink-faint">{chunks} 段增量</span>
+          <span className="font-mono text-[10px] text-ink-faint">
+            合并 {chunks} 段 · {text.length.toLocaleString()} 字符
+          </span>
         </div>
         <p className="mt-0.5 max-h-28 overflow-hidden whitespace-pre-wrap break-words text-xs leading-relaxed text-ink-soft">
-          {clip(text, 600)}
+          {shown}
           {streaming ? <span className="ml-0.5 inline-block animate-pulse text-neon-cyan">▍</span> : null}
         </p>
       </div>

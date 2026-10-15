@@ -247,7 +247,7 @@ export const mockRunDetail: RunDetail = {
   ],
   verification: mockVerification,
   revision_count: 1,
-  token_usage: { prompt: 1_284_500, completion: 157_800, total: 1_442_300 },
+  token_usage: { prompt_tokens: 1_284_500, completion_tokens: 157_800, total_tokens: 1_442_300 },
   token_by_node: mockTokenByNode,
   draft: mockReport,
   citations: mockCitations.citations,
