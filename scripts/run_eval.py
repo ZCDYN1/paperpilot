@@ -18,6 +18,15 @@ python scripts/run_eval.py --suite all
 
 检索消融产出的表格是**真实数字**（只要 embedding 不是 mock）；
 mock 环境下仍会跑，但报告顶部会带显著警告 —— 那种情况下它只验证评测管线，不代表检索质量。
+
+## 与 `POST /api/v1/eval/run` 的关系（同一个入口，两种触发方式）
+
+评测能力现在抽在 `app/eval/service.py` 里（`run_ablation_eval` / `run_ragas_eval`），
+本脚本与 HTTP 接口**调的是同一份实现**：脚本负责打印与人读的报告文件，
+接口负责落库与后台执行。所以本文件的输出顺序、退出码逐字保持原样 ——
+它只是同一套能力的一张 CLI 皮。
+
+`--suite metrics`（§8 成功指标）走 `app.eval.success_metrics`，见 `python -m app.eval.success_metrics`。
 """
 
 from __future__ import annotations
@@ -31,9 +40,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.core.config import get_settings  # noqa: E402
-from app.eval.ablation import run_and_render  # noqa: E402
+from app.eval import service as eval_service  # noqa: E402
 from app.eval.dataset import load_golden  # noqa: E402
-from app.retrieval.hybrid_retriever import HybridRetriever  # noqa: E402
 
 _ROOT = Path(__file__).resolve().parent.parent
 
@@ -45,7 +53,7 @@ async def _run_ablation(args: argparse.Namespace, output_dir: Path) -> int:
     print("=" * 78)
 
     settings = get_settings()
-    retriever = HybridRetriever(settings=settings)
+    retriever = eval_service.build_retriever(settings)
     if retriever.is_empty:
         print("✗ 索引为空 —— 先跑 `python scripts/build_index.py` 建索引")
         return 2
@@ -60,9 +68,12 @@ async def _run_ablation(args: argparse.Namespace, output_dir: Path) -> int:
     print()
 
     out = Path(args.output) if args.output else output_dir / "ablation_latest.md"
-    markdown, _results = await run_and_render(
-        retriever, items, settings=settings, golden_path=args.golden, top_k=args.top_k
+    # retriever 与 items 由上面现成的一对比直接传进来：既保住"先打印索引信息再跑评测"的
+    # 输出顺序，也让脚本与接口共用同一次评测实现（不在脚本里重算一遍）。
+    outcome = await eval_service.run_ablation_eval(
+        retriever=retriever, items=items, golden_path=args.golden, top_k=args.top_k, settings=settings
     )
+    markdown = outcome.markdown or ""
 
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(markdown, encoding="utf-8")
@@ -87,7 +98,10 @@ async def _run_ragas(args: argparse.Namespace, output_dir: Path) -> int:
     print("=" * 78)
 
     try:
-        from app.eval import ragas_runner
+        # 只为"这个模块在不在"这件事而 import（评测实现已经转调 `eval_service`）：
+        # 模块缺失与 ragas 包缺失是两件事 —— 前者在这里退出 2，
+        # 后者会走到 `run_ragas_eval` 内部、返回一份 available=False 的报告（退出 3）。
+        from app.eval import ragas_runner  # noqa: F401
     except ImportError as exc:
         print(f"✗ 未找到 RAGAS 运行器：{exc}")
         print("  （生成侧评测是可选项，不影响检索消融与主流程）")
@@ -103,19 +117,25 @@ async def _run_ragas(args: argparse.Namespace, output_dir: Path) -> int:
         return 3
 
     try:
-        report = await ragas_runner.run_ragas_eval(run_ids=args.run_id)
+        # 传**列表**而不是原来那个裸字符串：`run_ragas_eval(run_ids="abc123")` 会被
+        # `list(str)` 拆成 ["a","b","c"]，于是一条真实存在的 run 也查不到，
+        # 只会得到一句误导性的"没有可评测的 run"。其余行为逐字不变。
+        outcome = await eval_service.run_ragas_eval(
+            run_ids=[args.run_id] if args.run_id else None
+        )
     except Exception as exc:  # noqa: BLE001
         print(f"✗ RAGAS 执行失败：{type(exc).__name__}: {exc}")
         return 1
 
-    if not getattr(report, "available", True):
-        print(f"✗ RAGAS 不可用：{getattr(report, 'reason', '未知原因')}")
+    if not outcome.ok:
+        print(f"✗ RAGAS 不可用：{outcome.reason}")
         return 3
 
     out = output_dir / "ragas.md"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(str(report), encoding="utf-8")
-    print(str(report))
+    report = outcome.markdown or ""
+    out.write_text(report, encoding="utf-8")
+    print(report)
     print(f"\n✓ 报告已写入 {out}")
     return 0
 

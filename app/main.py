@@ -21,6 +21,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
+
+# 别名导入而不是 `from app.api.v1 import eval`：`eval` 是内置函数名，直接引进来会遮蔽它
+from app.api.v1 import eval as eval_routes
 from app.api.v1 import health, papers, research, stats, terms
 from app.core.config import get_settings
 from app.core.logging import setup_logging
@@ -135,6 +138,7 @@ def create_app() -> FastAPI:
     app.include_router(papers.router, prefix="/api/v1")
     app.include_router(terms.router, prefix="/api/v1")
     app.include_router(stats.router, prefix="/api/v1")
+    app.include_router(eval_routes.router, prefix="/api/v1")
 
     # 前端挂载必须排在所有 API 路由之后（见 _mount_web_ui 的路由顺序说明）
     if _mount_web_ui(app):
