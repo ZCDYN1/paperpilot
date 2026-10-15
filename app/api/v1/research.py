@@ -296,6 +296,7 @@ async def research_stream(req: ResearchRequest) -> StreamingResponse:
     emitter = SSEEmitter(run_id)
 
     async def event_gen():
+        interrupted_emitted = False
         try:
             await _register_run(run_id, session_id, question)
             async with open_graph() as graph:
@@ -304,6 +305,14 @@ async def research_stream(req: ResearchRequest) -> StreamingResponse:
                     graph, _initial_state(req, run_id, session_id, question), config
                 ):
                     yield frame
+                    # ★ 中断帧一发出就把状态落库，不等这条流跑完。
+                    # 前端看到 interrupted 就会关掉 SSE 连接去渲染可编辑拆解 ——
+                    # 状态若只在流末尾写，它要么停在 running、要么被下面的断开分支
+                    # 改写成 cancelled，随后用户点"继续"会被 resume 门禁拒掉。
+                    # （前端契约测试 stream.e2e.spec.ts 就是这条路径撞红的。）
+                    if not interrupted_emitted and frame.startswith("event: interrupted"):
+                        interrupted_emitted = True
+                        await _update_run_status(run_id, AWAITING_INPUT_STATUS)
 
             # 状态取自发射器：停在 HITL 中断的 run 写 `awaiting_input` 而不是 `completed`。
             # 以前这里无条件写 completed，于是"正在等用户确认子问题"的 run
@@ -312,7 +321,11 @@ async def research_stream(req: ResearchRequest) -> StreamingResponse:
         except asyncio.CancelledError:
             # 客户端断开：记录后原样抛出，不要吞掉
             logger.info("research.client_disconnected", run_id=run_id)
-            await _update_run_status(run_id, "cancelled")
+            # 已经停在中断点的 run 不是"被取消"，是"在等用户"—— 断开是这里的正常行为，
+            # 写成 cancelled 会把这条 run 从 resume 门禁外面推出去，用户再也继续不了。
+            if not interrupted_emitted:
+                await _update_run_status(run_id, "cancelled")
+            raise
             raise
         except Exception as exc:  # noqa: BLE001
             logger.exception("research.failed", run_id=run_id)
@@ -339,23 +352,31 @@ def _final_status(last_status: str) -> str:
     return "completed"
 
 
-# `research_runs.status` 的"停在 HITL 中断点 A"取值。事实来源就这一处：
-# `_final_status()` 由流末尾的 `interrupted` 信号写入，列表页、`GET /{run_id}`、
-# 前端 `awaiting_input` 渲染消费的都是同一个值（`test_stream_interrupts_after_plan_
-# and_reports_awaiting_input` 把它钉成了回归断言）。checkpoint 的 `next` 只回答
-# "图是否停着"，回答不了"这条 run 是否还在用户可确认的窗口里"（failed/cancelled
-# 的 run 的 checkpoint 同样可能挂着未完成任务），所以门禁取数据库状态这一份既有事实。
+# `research_runs.status` 的"停在 HITL 中断点 A"取值：`_final_status()` 与流里的
+# 中断帧写入，列表页、`GET /{run_id}`、前端 `awaiting_input` 渲染消费的是同一个值
+# （`test_stream_interrupts_after_plan_and_reports_awaiting_input` 把它钉成回归断言）。
 AWAITING_INPUT_STATUS = "awaiting_input"
+
+#: 已经跑完的状态：门禁只拦这两个。
+#:
+#: 为什么不用 `status == awaiting_input` 当唯一放行条件：这条 run 到底有没有停在
+#: 中断点 A，权威事实在 LangGraph 的 checkpoint 里，而 `research_runs.status` 是
+#: 流跑完才写的**副本**。客户端在中断点关掉 SSE（前端就是这么做的：拿到 interrupted
+#: 就去渲染可编辑拆解）时，副本会留在 running、甚至被断开分支写成 cancelled ——
+#: 拿副本当唯一放行条件，等于让"用户点继续"依赖"前端有没有把流读完"。
+#: （这条真实踩过：前端契约测试 `stream.e2e.spec.ts` 因 resume 409 而红。）
+#:
+#: 反过来，被挡掉的 completed/failed 已经覆盖了这道门要防的事：
+#: 对跑完的 run 反复续跑（白烧 LLM 配额、把报告重生成一遍）。
+NON_RESUMABLE_STATUSES = frozenset({"completed", "failed"})
 
 
 async def _ensure_resumable(run_id: str) -> None:
-    """resume 状态门禁：只放行 `awaiting_input` 的 run，其余一律 4xx。
+    """resume 门禁：跑完的 run 不能再续跑，其余放行（未知 run_id 404）。
 
-    没有这道门，任何人都能对任意 run_id 反复触发续跑（重放、白烧 LLM 配额），
-    或对已完成的 run 再跑一遍。刻意**只读不占位**：resume 期间状态保持
-    `awaiting_input`，进程中途死掉/客户端断开后 run 不会被卡在"running"死档，
-    用户仍然可以从断点重试 —— 这比堵住"同一瞬间双击两次并发 resume"的窄窗口
-    更值（串行重放已被本门禁拒绝：跑完后状态是 completed/failed）。
+    刻意**只读不占位**：续跑期间不改状态，进程中途死掉/客户端断开后 run 仍可从断点
+    重试，不会卡在 "running" 死档。代价是"同一瞬间并发两次 resume"都能过门禁 ——
+    串行重放已被拒绝（跑完即 completed），这个窄窗口换成"崩溃后一定能重试"是值的。
     """
     async with session_scope() as db:
         run = await db.get(ResearchRun, run_id)
@@ -371,15 +392,15 @@ async def _ensure_resumable(run_id: str) -> None:
                 "hint": "run_id 来自 SSE run_started 事件的 data.run_id。",
             },
         )
-    if status != AWAITING_INPUT_STATUS:
+    if status in NON_RESUMABLE_STATUSES:
         raise HTTPException(
             status_code=409,
             detail={
                 "code": "not_resumable",
                 "run_id": run_id,
                 "status": status,
-                "reason": "该 run 当前不在等待用户确认子问题的状态，不能续跑",
-                "hint": "只有停在 HITL 中断点（awaiting_input）的 run 才能 resume；已完成的 run 请直接查看报告。",
+                "reason": "该 run 已经跑完，不能再次续跑",
+                "hint": "报告与引用请直接用 `GET /api/v1/research/{run_id}`；想重做请发起新的研究。",
             },
         )
 

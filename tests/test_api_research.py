@@ -595,3 +595,31 @@ async def test_awaiting_input_run_keeps_ended_at_null(client):
     row = next(r for r in (await client.get("/api/v1/research?limit=20")).json()["items"] if r["run_id"] == run_id)
     assert row["status"] == "awaiting_input"
     assert row["ended_at"] is None
+
+
+async def test_resume_works_after_client_aborts_at_the_interrupt_point(client):
+    """前端拿到 `interrupted` 就关掉 SSE 去渲染可编辑拆解，这条路上 resume 必须还能用。
+
+    这是真实撞过的一次：resume 门禁只认 `awaiting_input`，而那个状态原来是
+    "整条流跑完"才写的 —— 客户端提前断开时它压根没写，DB 还停在 running，
+    于是用户点"继续"吃 409，HITL 整条功能在前端手里失效（单测全绿，
+    因为是 `stream.e2e.spec.ts` 那种"半途关流"的用法把它撞红的）。
+    """
+    run_id = None
+    async with client.stream("POST", STREAM_URL, json={"question": "RAG 忠实性评估的代价", "top_k": 3}) as resp:
+        assert resp.status_code == 200
+        async for line in resp.aiter_lines():
+            if line.startswith("data: "):
+                data = json.loads(line[6:])
+                run_id = data.get("run_id", run_id)
+            if line.startswith("event: interrupted"):
+                break  # 前端在这里关流
+    await resp.aclose()
+    assert run_id
+
+    # 状态必须是 awaiting_input：中断帧一发出就该落库，不能等一条已经被关掉的流跑完
+    row = next(r for r in (await client.get("/api/v1/research?limit=20")).json()["items"] if r["run_id"] == run_id)
+    assert row["status"] == "awaiting_input", row["status"]
+
+    resumed = (await client.post(f"/api/v1/research/{run_id}/resume", json={})).text
+    assert first_data(resumed, "done")["status"] == "ok"
