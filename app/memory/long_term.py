@@ -318,7 +318,13 @@ class LongTermMemoryStore:
             if len(rows) <= keep:
                 return 0
 
-            ordered = sorted(rows, key=lambda r: -self._retention_score(r, now))
+            # 次级键 `-id`：并列分时**更早写入的那条先淘汰**。
+            # 只按保留分排是不够的 —— `created_at` 来自 SQLite 的 CURRENT_TIMESTAMP，
+            # 只有**秒级精度**，同一秒内写入的两条重要度又相同时分数完全相等，
+            # 谁被淘汰就取决于数据库返回行的顺序（实测表现为偶发：负载高、写入跨了秒界就翻面）。
+            # 那种不确定性在功能上无所谓（两条都是已读论文），但它会让任何
+            # 想断言"最旧先淘汰"的测试变成掷硬币，也会让记忆行为不可复现。
+            ordered = sorted(rows, key=lambda r: (-self._retention_score(r, now), -int(r.id or 0)))
             victims = ordered[keep:]
             for row in victims:
                 await session.delete(row)

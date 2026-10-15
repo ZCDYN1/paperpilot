@@ -221,3 +221,23 @@ async def test_long_term_remember_run_writes_direction_and_papers(scope, embedde
     remaining = set(await store.recall("RAG 重排技术发展脉络", top_k=10, session_id="s1"))
     assert "RAG 重排技术发展脉络" in remaining
     assert any("重排显著提升召回质量" in r for r in remaining)
+
+
+async def test_eviction_breaks_score_ties_by_insertion_order(scope, embedder):
+    """并列分时**更早写入的那条先淘汰**，不能取决于数据库返回行的顺序。
+
+    这条钉的是 `evict` 的次级排序键。SQLite 的 `CURRENT_TIMESTAMP` 只有秒级精度，
+    同一秒写入、重要度又相同的两条记忆保留分完全相等 —— 没有次级键时"谁被淘汰"
+    就是掷硬币，表现正是"单跑必过、全量偶发红"那类最难查的失败
+    （`test_long_term_remember_run_writes_direction_and_papers` 的注释里记着现场）。
+    """
+    store = LongTermMemoryStore(scope=scope, embedder=embedder, max_items=2)
+    for i in (1, 2, 3):
+        await store.remember(f"记忆{i}", session_id="s1", importance=0.5)
+
+    # `remember` 末尾自己会调一次全局 evict，所以这里断言的是"写完三条之后的稳定状态"
+    hits = await store.recall("记忆", top_k=10, session_id="s1")
+    assert not any("记忆1" == h for h in hits), "最早写入的那条必须被淘汰"
+    assert any("记忆3" == h for h in hits)
+    assert await store.count(session_id="s1") == 2
+    assert await store.evict(session_id="s1") == 0, "已在容量内却还在删（说明淘汰没收敛）"
