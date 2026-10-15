@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import NullPool
 
 from app.core.config import get_settings
 from app.db.base import Base
@@ -53,7 +54,21 @@ def get_engine() -> AsyncEngine:
             settings.sqlite_url,
             echo=False,
             future=True,
-            pool_pre_ping=True,
+            # ★ 为什么是 NullPool 而不是默认的队列池（这条是实测撞出来的，不是预防性调优）：
+            # 一条 SSE 流被客户端掐断时，uvicorn 取消该请求的任务，而它当时正持着一条
+            # **池里共享的** aiosqlite 连接 —— 日志里表现为紧接着
+            # `research.client_disconnected` 出现 `Exception terminating connection <AdaptedConnection ...>`。
+            # 被 terminate 的连接不会干净地回到池里，下一个任务拿到它就是**永挂**：
+            # 表现为 `planner.done` 之后再也没有任何节点日志、SSE 一条事件都不发，
+            # 直到客户端自己的 300 秒 bodyTimeout 才断开。踩不踩中是随机的，
+            # 所以本地看起来"重跑一遍就绿"，最容易被判成测试不稳定。
+            #
+            # aiosqlite 的连接本身就绑在创建它的任务上，跨任务复用没有收益只有风险；
+            # NullPool 每次用完即关，僵尸连接无从传染。代价是每次签出一条新连接，
+            # 对 SQLite 而言这个开销可以忽略（打开的是本地文件，且 WAL 下并发读不打架），
+            # 换来的是"取消一个请求不会危害其它请求"。
+            poolclass=NullPool,
+            # `pool_pre_ping` 在 NullPool 下没有对象可校验（每次都是新连接），去掉。
         )
         _install_sqlite_pragmas(_engine)
     return _engine
