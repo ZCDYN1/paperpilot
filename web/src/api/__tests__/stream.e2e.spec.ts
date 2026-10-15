@@ -84,7 +84,10 @@ async function* sse(path: string, body: unknown): AsyncGenerator<Ev> {
 describe.skipIf(skip)("真实流式（token 事件）", () => {
   it(
     "writer 真的在发 token；payload 形状、顺序与「预览 ≠ 最终报告」三条边界成立",
-    { timeout: 600_000 },
+    // 实测（本机 Ollama qwen2.5:7b，同一条问题）：144s / 244s / 437s 都过过，
+    // 而两个研究同时抢一个 Ollama 时 >600s 被掐死过一次。
+    // 这条断言测的是"流式对不对"，不是"跑得快不快"，所以预算按最慢观测的 2 倍给。
+    { timeout: 900_000 },
     async () => {
       // ---- 第一段：跑到 HITL 中断点 A
       let runId = "";

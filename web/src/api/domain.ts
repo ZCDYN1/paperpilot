@@ -300,6 +300,137 @@ export interface ResilienceSnapshot {
   breakers: Record<string, BreakerState>;
 }
 
+/* ============================================================ 配置中心
+   源：`app/api/v1/config.py`。密钥**永不回传明文**，只回"是否已设置 + 掩码"。 */
+
+/** 表单能改的字段。空字符串对密钥字段表示"保持原值不变"，不是"清空"。 */
+export interface ConfigValues {
+  llm_provider?: "openai" | "ollama" | "mock";
+  llm_model?: string;
+  llm_temperature?: number;
+  /**
+   * 结构化输出的实现方式。`auto` = 不干预，用各端点自己的默认。
+   *
+   * ★ 接 OpenAI 兼容网关（DeepSeek 等）时这个值决定**能不能跑通**：
+   * 那些端点会对默认的 json_schema 方式回
+   * `400 This response_format type is unavailable now`，
+   * 症状是"每个结构化节点都失败、而普通对话一切正常"。
+   */
+  llm_structured_method?: "auto" | "function_calling" | "json_mode" | "json_schema";
+  /** true = 结构化调用时关掉思考模式（思考模式端点不接受 function_calling 所需的 tool_choice） */
+  llm_disable_thinking?: boolean;
+  openai_base_url?: string;
+  openai_api_key?: string;
+  ollama_base_url?: string;
+  ollama_model?: string;
+  embedding_provider?: "local" | "api" | "mock";
+  embedding_model?: string;
+  embedding_api_base_url?: string;
+  embedding_api_key?: string;
+  rerank_provider?: "local" | "lexical";
+  /** HF 仓库名或本地目录；权重缺失时后端不崩，会降级 lexical 并在日志给出获取命令 */
+  rerank_model?: string;
+  min_corpus?: number;
+}
+
+/** 密钥字段的展示形态：只给"设过了没有"和掩码，绝不给明文 */
+export interface SecretState {
+  set: boolean;
+  /** 形如 `sk-…3f9a`；未设置时为空串 */
+  masked: string;
+}
+
+/**
+ * 表单能改的字段名。
+ *
+ * ★ 为什么把 `sources` / `restart_required` 的键收成这个类型而不是
+ * `Record<string, ...>` / `string[]`：这个页面唯一的真相源就是字段名，
+ * 而 mock 里的字段名是**手抄**的。之前 mock 的 `sources` 漏了
+ * `embedding_api_base_url` / `embedding_api_key`，界面就少渲染两个来源标签，
+ * 而 `Record<string, X>` 让这件事在编译期完全无声。收成联合类型后抄漏/抄错立刻红。
+ */
+export type ConfigField = keyof ConfigValues;
+
+/** 这个字段当前生效的值是从哪一层来的（优先级：env > .env > 代码默认值） */
+export type ConfigSource = "dotenv" | "env" | "default";
+
+export interface ConfigResponse {
+  values: ConfigValues;
+  secrets: { openai_api_key: SecretState; embedding_api_key: SecretState };
+  /** 每个可编辑字段的取值来源 —— 后端按 `EDITABLE` 全量返回，所以这里要求键齐全 */
+  sources: Record<ConfigField, ConfigSource>;
+  /** 后端是否允许写配置（关掉时界面只读并说明原因） */
+  writable: boolean;
+  /** 改了这些字段要重启才生效 —— 必须显示给用户，不能让他以为存了就完事 */
+  restart_required: ConfigField[];
+  /** 每个 provider 取值的合法集合，界面下拉照它渲染，不在前端硬编码 */
+  options: {
+    llm_provider: string[];
+    llm_structured_method: string[];
+    embedding_provider: string[];
+    rerank_provider: string[];
+  };
+}
+
+export interface ConfigWriteResult {
+  ok: boolean;
+  updated: ConfigField[];
+  /** 需要重启才生效的字段 */
+  restart_required: ConfigField[];
+  /** 写入前自动备份的文件名，界面上要显示 —— 用户要知道改坏了能退回去 */
+  backup: string | null;
+  /** 被拒绝的字段及原因（如 provider 取值不在白名单） */
+  rejected: Array<{ field: string; reason: string }>;
+  /**
+   * 已写入 `.env`、但**当前进程里被同名环境变量压住所以不生效**的字段。
+   *
+   * ★ 必须显示：这是"保存成功但值没变"的唯一解释。`sources` 只在 GET 里给，
+   * 而保存后界面展示的是这份返回体，少了它就只能让用户自己去猜。
+   */
+  shadowed: ConfigField[];
+}
+
+/**
+ * 连通性探测的请求体（`POST /api/v1/config/test`）。
+ *
+ * ★ 地址与密钥允许**随请求带上**而不必先保存：使用者最想要的正是
+ * "填完点一下看看通不通"，如果必须先落盘才能测，错了就已经写进 `.env` 了。
+ */
+export interface ConfigTestRequest {
+  provider: "openai" | "ollama" | "mock";
+  openai_base_url?: string;
+  /** 明文只在这一次请求里出现，后端不会把它回显进响应，也不会落盘 */
+  openai_api_key?: string;
+  ollama_base_url?: string;
+  /** 想顺带确认"这个模型名到底能不能用"就带上它；后端会做一次 1 token 的真实调用 */
+  model?: string;
+}
+
+/**
+ * 模型名校验的结果。`checked: false` 表示**没能判定**（网络失败，或上游回了与模型名
+ * 无关的错误码），这种情况下界面不许说"模型名不对"。
+ */
+export interface ModelCheck {
+  checked: boolean;
+  ok: boolean;
+  detail: string;
+}
+
+export interface ConfigTestResult {
+  ok: boolean;
+  provider: string;
+  /** 一句人话的结论；失败时后端保证这里不含 URL 查询串或凭据 */
+  detail: string;
+  /** 成功时顺带列出的可用模型名 */
+  models?: string[];
+  /**
+   * ★ 模型名对不对的权威结论在这里，不在 `models` 列表里。
+   * OpenAI 兼容网关的 `/models` 返回的是**展示名**（DeepSeek 给 `DeepSeek-V4.1-Flash`），
+   * 调用用的 id 是另一个写法（`deepseek-flash`）—— 只比对列表会把能用的配置报成错的。
+   */
+  model_check?: ModelCheck;
+}
+
 /* ============================================================ 请求体
    顶层与 filters 都是 `extra="forbid"`（`app/schemas/research.py`）——
    多带任何一个键就整请求 422，而且是静默整批拒，所以这里一个字段都不要加。 */

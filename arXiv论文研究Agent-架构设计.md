@@ -47,6 +47,11 @@
       20 条**模型裁判**抽检（非人工，`eval_results/citation_spotcheck.csv` 的 `human_note` 已逐条标明）
       判 `supported=20`，与自动口径一致率 0.60：自动侧多判的 8 条里 5 条是软校验裁判模型能力问题、
       3 条是逐字比对未归一化 `[58]` 引用号与 `matches) .` 这类排版残留 —— **自动口径因此系统性偏低**。
+      这 3 条的成因已落地为 `app/agents/nodes/_common.py::quote_match` 的**两段式归一化**（精确比较 →
+      容忍 PDF/HTML 抽取残留，覆盖内联引用标号 / 标点前空白 / 弯直引号三类；`read` 侧重锚与 `verify`
+      硬校验共用同一份定义，容忍通过的痕迹经 `verify_note` 落进 `citations.note` 可审计，
+      `tests/test_quote_matching.py` 反向钉住"编造引文照旧判失败"）。
+      归一化会改变该口径数值，故**接真实 LLM 后仍需重跑一次评测拿新基线**，此条仍未达标、待复核。
       人工口径仍未采（脚本已就绪，`--from-csv` 直接出数）。
 - [ ] RAGAS `faithfulness` 相对纯向量检索基线提升 ≥ 15%
       → 未测：需要 `[eval]` 可选依赖 + 真实 LLM 裁判才能出分（缺依赖时接口返回 501，不产 mock 分数）。
@@ -61,7 +66,8 @@
       `sample_data/corpus.json`；等价的零 key 冷启动（提交 → SSE → resume → 完成、引用落库）已在本地实测通过。
       **容器这一步未实测**：开发机 Docker 无法访问镜像仓库（拉不到 `python:3.12-slim`），需在能拉镜像的环境复验。
 - [x] ≥ 15 个单测 + 1 个 GitHub Actions workflow
-      → 达标。离线单测 180+ 个（全 mock，不联网不下模型），`.github/workflows/ci.yml` 含测试、ruff、
+      → 达标。离线单测 **590 个**（2026-10-15 `pytest --collect-only` 实测，分布在 53 个
+      `tests/test_*.py` 文件里；全 mock，不联网不下模型），`.github/workflows/ci.yml` 含测试、ruff、
       评测冒烟与镜像构建冒烟四个环节。
 
 ---
@@ -165,7 +171,8 @@ paperpilot/
 │   │       ├── terms.py             # 术语标注与查询（F11）
 │   │       ├── stats.py             # 全局聚合指标（首页卡片 / 系统页）
 │   │       ├── health.py            # /healthz 与 /resilience
-│   │       └── eval.py              # 评测触发与轮询（POST /eval/run、GET /eval/runs/{id}）
+│   │       ├── eval.py              # 评测触发与轮询（POST /eval/run、GET /eval/runs/{id}）
+│   │       └── config.py            # 界面内配置中心：读 / 写 .env + provider 连通性探测（§7 / §13）
 │   ├── core/
 │   │   ├── config.py                # pydantic-settings，读 .env
 │   │   ├── logging.py               # structlog 结构化日志
@@ -214,10 +221,11 @@ paperpilot/
 │       ├── ragas_runner.py
 │       ├── ablation.py              # ★ 消融实验脚本
 │       └── datasets/golden_50.jsonl
-├── ui/streamlit_app.py
-├── scripts/{fetch_sample.py,build_index.py,run_eval.py}
-├── sample_data/                     # ★ 8 篇样例论文元数据 + 预建 chunk，保证离线可跑
-├── tests/                           # 单测（≥15 个，见 §1.4 验收）
+├── web/                             # React 控制台（Vite + TS，主界面；构建产物 web/dist 由后端同源挂载）
+├── ui/streamlit_app.py              # Streamlit 面板（控制台的先行版本，可选调试入口）
+├── scripts/{fetch_sample.py,build_index.py,run_eval.py,launch.py}
+├── sample_data/                     # ★ 24 篇真实 arXiv 论文的摘要级语料，保证离线可跑
+├── tests/                           # 单测（590 个，见 §1.4 验收）
 │   ├── test_fusion.py               # RRF 正确性（含并列名次、空列表边界）
 │   ├── test_retriever.py            # 混合检索 + metadata 过滤
 │   ├── test_security.py             # 注入防护 + 输出校验
@@ -613,11 +621,17 @@ RRF 只用**排名**：`Σ 1/(k + rank)`，量纲问题被彻底绕过，且对�
 | POST | `/api/v1/papers/ingest` | 按 `arxiv_ids` / `query` 批量入库并刷新索引；**同步 200**（arXiv 限速约 1 req/3s、50 篇封顶，入库幂等，超时原样重试即可） | ✅ |
 | POST | `/api/v1/eval/run` | 触发评测（`ablation` / `metrics` / `ragas`），202 + `eval_run_id`；并发收 `409`，缺 `[eval]` 依赖收 `501` | ✅ |
 | GET | `/api/v1/eval/runs/{eval_run_id}` | 评测状态与结果；同时返回 `status`（库里的事实）与 `is_running`（本进程闸门），进程重启后遗留的 `running` 行据此可辨 | ✅ |
+| GET | `/api/v1/config` | 读取当前生效配置：密钥字段只回 `{set, masked}`，并附每字段来源（`env`/`dotenv`/`default`）与 `writable` 开关 | ✅ |
+| PUT | `/api/v1/config` | 写回根目录 `.env`（按行更新、保留注释、自动备份 `.env.bak-<时间戳>`）；Host 白名单 + 同源校验，`CONFIG_WRITABLE=false` 时 403 | ✅ |
+| POST | `/api/v1/config/test` | 探测 LLM provider 连通性（地址 / 密钥可随请求带、不必先保存）；不落盘，故**不受 `CONFIG_WRITABLE` 限制** | ✅ |
 
 > 原先列在"待实现"里的 `GET /api/v1/papers`（语料分页）与 `GET /api/v1/metrics/tokens`（成本统计）
 > 已分别由 `GET /papers` 与 `GET /stats/overview` 落地，故从表中移除。
 > 至此本表**没有待实现项**：`papers/ingest` 与 `eval/run` 是最后补上的两个入口，
 > 命令行脚本（`scripts/run_eval.py`、`scripts/build_index.py`）保留为同一套服务层的快捷方式。
+> `config` 这一组（`GET` / `PUT` / `POST /test`）是**界面内配置中心**的入口，见 §13；
+> 它是全表里唯一会**写磁盘**（写 `.env`）的接口，故额外带了 Host 白名单、同源校验与
+> `CONFIG_WRITABLE` 总开关三层闸门（`app/api/v1/config.py::_check_origin`）。
 
 > 「实现状态」这一列是刻意加的：上面这张表最初是**设计目标**，不是清单快照。
 > 一张看起来都像已实现的表会让人照着写前端，然后在 404 上花掉半天。
@@ -938,6 +952,11 @@ provider/model/base_url/key 四项必须同改；`0.61`（18 条引用）与 `0.
 它由后端同源挂载：`app/main.py::_mount_web_ui()` 在构建产物 `web/dist` 存在时把它挂成单端口前端
 （因此**不需要 CORS、不需要第二个 Node 服务、不需要第二个容器**），不存在则安静跳过、
 退回下面的 Streamlit 面板。构建：`cd web && npm ci && npm run build`。
+
+「运维」分组下另有一页**配置中心**（`web/src/pages/SettingsPage.tsx`，对应 §7 的 `config` 三接口）：
+它把 `.env` 里可改的那一小组字段（LLM / Embedding / Rerank 的 provider、模型、地址、密钥、
+`MIN_CORPUS`）搬到界面上，填完可先探测连通性再保存，省去"改了 key 却因为根本没生效而查半天"。
+因为它是唯一写磁盘的接口，默认只允许本机 Host 访问，`CONFIG_WRITABLE=false` 可整体转只读。
 
 下面这一节描述的是 **`ui/streamlit_app.py` 的三栏面板**——它是控制台的先行版本，
 保留作轻量调试与"装不了 Node 的人也能看到界面"的兜底入口。两者的信息架构同源，

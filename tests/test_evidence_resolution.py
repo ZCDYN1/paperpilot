@@ -408,13 +408,15 @@ async def test_verify_hard_check_accepts_reanchored_citation():
         "claim": "融合把两路排名合起来。",
         "verified": False,
     }
-    ok, reason, anchor, how = verifier_node._hard_check(citation, known, papers)  # noqa: SLF001
+    # 第五个返回值是"逐字比较路径"（exact | residual:<类>），与定位路径正交
+    ok, reason, anchor, how, match = verifier_node._hard_check(citation, known, papers)  # noqa: SLF001
     assert ok is True
     assert reason == ""
     # 第三个返回值是定位结果：verify 要靠它把真实片段带下去（见 _anchor 的键名说明）
     assert anchor["resolved_chunk_id"] == 101
     # 第四个返回值是定位路径（供 citation_rescue 事件统计）：精确命中就是 exact
     assert how == "exact"
+    assert match == "exact", "逐字直接命中就不该走容忍层（否则归一化会污染精确口径）"
 
 
 async def test_verify_hard_check_still_fails_fabricated_quote():
@@ -427,8 +429,9 @@ async def test_verify_hard_check_still_fails_fabricated_quote():
         "claim": "检索其实没必要。",
         "verified": False,
     }
-    ok, reason, anchor, how = verifier_node._hard_check(citation, known, papers)  # noqa: SLF001
+    ok, reason, anchor, how, match = verifier_node._hard_check(citation, known, papers)  # noqa: SLF001
     assert ok is False
     assert reason == "引文未能在原文中逐字匹配"
     assert anchor == {}, "没定位到就不该产出任何「纠正后的定位」"
     assert how == "exact", "定位路径与校验结论是两回事：定位到了（exact），但引文对不上"
+    assert match == "", "编造的引文连容忍层也救不回来：找不到就是找不到"

@@ -6,6 +6,12 @@ import type {
   BuildEdgesResult,
   CitationBundle,
   CitationGraph,
+  ConfigResponse,
+  ConfigTestRequest,
+  ConfigTestResult,
+  ConfigValues,
+  ConfigWriteResult,
+  ConfigField,
   HealthResponse,
   OverviewStats,
   PaperDetail,
@@ -24,6 +30,7 @@ import {
   MOCK_SESSION_ID,
   fixtures,
   mockComparison,
+  mockConfig,
   mockCitations,
   mockGraph,
   mockHealth,
@@ -56,8 +63,16 @@ async function getJson<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 async function postJson<T>(path: string, body: unknown): Promise<T> {
+  return requestJson<T>(path, "POST", body);
+}
+
+async function putJson<T>(path: string, body: unknown): Promise<T> {
+  return requestJson<T>(path, "PUT", body);
+}
+
+async function requestJson<T>(path: string, method: string, body: unknown): Promise<T> {
   return getJson<T>(path, {
-    method: "POST",
+    method,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
@@ -304,6 +319,64 @@ export const api = {
       const hit = mockTerms.find((t) => t.term.toLowerCase() === term.toLowerCase());
       if (env.useMock) return asMock(hit ?? { term, explanation: "词表里暂时没有这个术语。" });
       return getJson(`${V1}/terms/${encodeURIComponent(term)}`);
+    },
+  },
+
+  config: {
+    /** 读取生效配置（密钥只回掩码） */
+    get(): Promise<ConfigResponse> {
+      if (env.useMock) return asMock(mockConfig);
+      return getJson<ConfigResponse>(`${V1}/config`);
+    },
+
+    /**
+     * 写配置。后端把它落到 `.env` 本身（只改表单管辖的键、保留注释与其余行、写前备份）。
+     * 返回体里的 `restart_required` 与 `backup` 必须显示给用户 ——
+     * "点了保存但没重启所以没生效"是这类界面最容易被误判成 bug 的地方。
+     */
+    put(values: ConfigValues): Promise<ConfigWriteResult> {
+      if (env.useMock) {
+        return asMock({
+          ok: true,
+          updated: Object.keys(values) as ConfigField[],
+          restart_required: mockConfig.restart_required.filter((k) => k in values),
+          backup: ".env.bak-mock",
+          rejected: [],
+          // mock 模式没有真的进程环境变量，所以这里恒空。真实模式由后端回报被
+          // 环境变量压住的字段（见 `ConfigWriteResult.shadowed` 的注释）。
+          shadowed: [],
+        });
+      }
+      return putJson<ConfigWriteResult>(`${V1}/config`, { values });
+    },
+
+    /**
+     * 探测 provider 连通性 —— **不必先保存**，地址与密钥随请求体带上。
+     *
+     * ★ 这条存在的理由：填错地址时代价很高（跑一次研究要等几分钟才知道连不上）。
+     * 后端保证失败详情里不含 URL 查询串与凭据，所以这里的 `detail` 可以原样显示。
+     */
+    test(body: ConfigTestRequest): Promise<ConfigTestResult> {
+      if (env.useMock) {
+        return asMock({
+          ok: true,
+          provider: body.provider,
+          detail: "mock 模式下不发起网络请求，这里只是演示探测结果的样子。",
+          models: ["mock-model-a", "mock-model-b"],
+          // 真实后端在有 model 时会做一次 1 token 调用来判定模型名（见 `ModelCheck`），
+          // mock 照同一形状给，界面才不会在两种模式下显示成两回事
+          model_check: body.model
+            ? {
+                checked: true,
+                ok: ["mock-model-a", "mock-model-b"].includes(body.model),
+                detail: ["mock-model-a", "mock-model-b"].includes(body.model)
+                  ? `模型 ${body.model} 可以正常调用（已用一次真实请求验证）。`
+                  : `这个服务不认识模型名 ${body.model}。换成它支持的模型名再试。`,
+              }
+            : undefined,
+        });
+      }
+      return postJson<ConfigTestResult>(`${V1}/config/test`, body);
     },
   },
 

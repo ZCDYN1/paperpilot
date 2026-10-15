@@ -23,8 +23,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Callable
 from typing import Any, Literal, get_args, get_origin
 
+import structlog
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, convert_to_messages
@@ -34,6 +36,8 @@ from pydantic import BaseModel
 
 from app.core.config import Settings, get_settings
 from app.observability.token_meter import get_token_meter, resolve_node
+
+logger = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # 与 prompts/loader 共享的"不可信文档"标记格式。
@@ -443,6 +447,11 @@ def get_llm(temperature: float | None = None) -> BaseChatModel:
         temperature: 不传则用 `settings.llm_temperature`。evaluator 需要"冻结温度"
                   才能做消融归因（架构 §12），所以这里显式留出覆盖口。
 
+    ★ 签名刻意只有一个参数：全项目有大量测试与调用点按 `get_llm(temperature)` 打桩，
+    给它加关键字参数会让那些桩当场失配（症状是容错测试报"没有抛出预期异常"，
+    看着像容错坏了，其实是签名漂移）。端点差异的处置放在 `_with_thinking_off`，
+    它复制实例、不改这个入口。
+
     ★ 为什么在这里统一挂 token 计量回调：
     `get_llm` 是全项目**唯一**构造 ChatModel 的地方，把计量器挂在这一处，
     就保证"任何一次 LLM 调用都会被记账"，不需要每个节点自觉上报，
@@ -482,13 +491,125 @@ def get_llm(temperature: float | None = None) -> BaseChatModel:
     return MockChatModel(temperature=t, callbacks=[meter])
 
 
-def get_structured_llm(schema: type[BaseModel], temperature: float | None = None) -> Runnable:
-    """返回"按 schema 出结构"的 Runnable。
+# 结构化输出在不同 OpenAI 兼容端点上的可用组合不一样，而且**只有真发一次请求才知道**
+# —— 400 是端点回来的，本地无从推断（实测：DeepSeek 的思考模式模型对三种方式分别回
+# "This response_format type is unavailable now" / "Prompt must contain the word 'json'"
+# / "Thinking mode does not support this tool_choice"）。所以这里按顺序试，而不是要求
+# 用户先去配一个开关 —— 他配的是模型，不该再来背端点差异。
+# 顺序把"什么都不传"放第一位：那是各 provider 的现行默认，ollama 与 mock 走的正是它，
+# 一上来就改写等于给一条没有故障的链路换实现。
+_STRUCTURED_RECIPES: tuple[dict[str, Any], ...] = (
+    {},  # provider 默认实现
+    {"method": "function_calling", "thinking_off": True},
+    {"method": "function_calling"},
+)
 
-    ⚠️ 不要把 `with_structured_output` 的结果缓存成模块级单例：不同节点用的 schema
-    不同，缓存 key 会退化成 `id(schema)`（不可靠），且 ChatModel 本身很轻。
+# 第一个成功的组合记在进程里，之后所有节点都用它（否则每条问句都要先浪费一次 400）。
+_working_recipe: int | None = None
+
+# 只在"请求形状被端点拒绝"时才换下一种组合。判窄有两条：
+# 1. 状态码存在且不是 400 就**一定不算** —— 401/403/429/5xx 是真故障，重试另一种写法
+#    只会把一次失败变成三次失败（熔断器的计数、耗时、token 账单都跟着失真）；
+# 2. 其余情况必须命中形状标记。刻意不收 `invalid_request_error` 这种通用类型名：
+#    DeepSeek 的"Authentication error"也带它，收进来就等于把鉴权失败当成写法问题。
+_SHAPE_MARKERS = ("response_format", "tool_choice", "json_schema", "thinking mode")
+
+
+def _is_request_shape_error(exc: BaseException) -> bool:
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status is not None and status != 400:
+        return False
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(marker in text for marker in _SHAPE_MARKERS)
+
+
+def _with_thinking_off(model: BaseChatModel) -> BaseChatModel:
+    """返回一个"这次请求关掉思考模式"的模型副本。
+
+    为什么复制实例而不是给 `get_llm` 加参数：思考模式只与**结构化调用**这一次请求冲突
+    （正文生成没这个限制），而 `get_llm(temperature)` 是全项目、包括大量测试桩共用的
+    签名 —— 为端点兼容去改它，代价会以"容错测试莫名变红"的形式在别处付。
+
+    没有 `extra_body` 字段的模型（ollama / mock）原样返回：它们本来就没有这个问题。
     """
-    return get_llm(temperature).with_structured_output(schema)
+    if "extra_body" not in getattr(type(model), "model_fields", {}):
+        return model
+    return model.model_copy(update={"extra_body": {"thinking": {"type": "disabled"}}})
+
+
+async def ainvoke_structured_raw(
+    schema: type[BaseModel],
+    messages: list[BaseMessage],
+    temperature: float | None = None,
+    *,
+    make_llm: Callable[[], BaseChatModel] | None = None,
+) -> dict[str, Any]:
+    """结构化调用，自动适配端点支持哪一种实现方式；返回 `{"parsed":…, "raw":…}`。
+
+    返回原始 dict 而不是拆好的 `(parsed, usage)`：`usage_of()` 住在节点层，而节点层
+    已经 import 了本模块 —— 在这里拆用量会把依赖方向绕成环。
+
+    `make_llm` 是**给调用方留的注入口**，节点层必须传它：容错与熔断的测试是把
+    `_common.get_llm` 换成假模型来验证"失败会记进熔断器"的。如果这里自己调
+    `get_llm`，那种 patch 就落不到实处 —— 症状不是测试变红，而是**测试直接去打真实 API**
+    （已经真发生过一次：断言"抛 TransientError"的用例拿到了真模型的正常返回，
+    报的是 DID NOT RAISE，看着像容错坏了）。
+
+    `parsed` 可能是 None：`include_raw=True` 下端点返回了不合规内容时**不抛异常**，
+    只给 `parsed=None`。是否降级由各节点自己决定（见 planner / reader 的处置）。
+
+    ⚠️ 不要把构造好的 Runnable 缓存起来：不同节点 schema 不同，缓存 key 会退化成
+    `id(schema)`（不可靠），而 ChatModel 本身很轻。这里只缓存"哪一种组合可用"。
+    """
+    global _working_recipe  # noqa: PLW0603 - 进程内的能力探测结果，见上面注释
+
+    factory = make_llm or (lambda: get_llm(temperature))
+    # 已探测出可用组合时先试它（一次调用就够）；但它也会失效 —— 运行中换模型/换端点
+    # 之后原来的组合可能又被拒了，所以形状类 400 一律清掉缓存、回退到全量探测。
+    order = list(range(len(_STRUCTURED_RECIPES)))
+    if _working_recipe is not None:
+        order.remove(_working_recipe)
+        order.insert(0, _working_recipe)
+    last_error: BaseException | None = None
+
+    for idx in order:
+        recipe = _STRUCTURED_RECIPES[idx]
+        kwargs = {"method": recipe["method"]} if "method" in recipe else {}
+        try:
+            llm = factory()
+            if recipe.get("thinking_off"):
+                llm = _with_thinking_off(llm)
+            result = await llm.with_structured_output(schema, include_raw=True, **kwargs).ainvoke(
+                messages
+            )
+        except Exception as exc:  # noqa: BLE001 - 只在"形状被拒"时换方案，其余原样上抛
+            if not _is_request_shape_error(exc):
+                raise
+            last_error = exc
+            _working_recipe = None
+            logger.warning(
+                "llm.structured_recipe_rejected",
+                recipe=recipe or "provider-default",
+                error=str(exc)[:200],
+            )
+            continue
+
+        _working_recipe = idx
+        if idx:  # 只在真的偏离默认实现时说一声，免得日志里全是噪音
+            logger.info(
+                "llm.structured_recipe",
+                recipe=recipe,
+                note="端点不支持默认方式，已自动改用这一种",
+            )
+        return result
+
+    raise RuntimeError(
+        "这个端点不接受任何已知的结构化输出方式"
+        f"（试过 {len(_STRUCTURED_RECIPES)} 种，最后一次的错误：{str(last_error)[:200]}）。"
+        "plan/read/verify/revise 四个节点都依赖结构化输出，缺它整条研究链路跑不起来。"
+    )
 
 
 def llm_identity() -> dict[str, str]:
@@ -504,7 +625,7 @@ def llm_identity() -> dict[str, str]:
 __all__ = [
     "MockChatModel",
     "get_llm",
-    "get_structured_llm",
+    "ainvoke_structured_raw",
     "llm_identity",
     "parse_untrusted_documents",
 ]

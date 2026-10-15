@@ -29,7 +29,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from app.agents.nodes._common import normalize_text
+from app.agents.nodes._common import normalize_text, quote_match
 
 # arXiv id 的版本后缀（2411.18583v1 / v12）：模型很爱带上它，而库里存的是裸 id。
 _VERSION_SUFFIX_RE = re.compile(r"v\d+$", re.IGNORECASE)
@@ -167,8 +167,11 @@ def resolve_citation(
                         return Resolution(chunk=chunk, paper_id=entry.arxiv_id)
 
         # 路径 3：同篇内按引文重锚
+        # 包含判定走 `_common.quote_match`（两段式：精确 → 抽取残留容忍），与 verify
+        # 硬校验共用同一份定义：这里若只用精确口径，带残留的真引文会在定位层就被拒，
+        # verify 的容忍层根本轮不到执行 —— 同一个判据分叉成两种严宽度，谁都没修对。
         for chunk in _ordered_candidates(entry.chunks, rendered_chunk_ids, restrict_to_rendered):
-            if normalized_quote and normalized_quote in normalize_text(chunk.get("text", "")):
+            if normalized_quote and quote_match(quote, chunk.get("text", "")):
                 return Resolution(
                     chunk=chunk, paper_id=entry.arxiv_id, recovered=True, how="quote"
                 )
@@ -190,7 +193,8 @@ def resolve_citation(
             real_paper_id, chunk = found
             if rendered_chunk_ids and cid not in rendered_chunk_ids:
                 continue  # 模型没见过的片段编号，不认
-            if normalized_quote and normalized_quote in normalize_text(chunk.get("text", "")):
+            # 引文旁证与路径 3、verify 硬校验同口径（quote_match），见上面的注释。
+            if normalized_quote and quote_match(quote, chunk.get("text", "")):
                 return Resolution(
                     chunk=chunk, paper_id=real_paper_id, recovered=True, how="swapped_chunk"
                 )

@@ -46,6 +46,12 @@ export const navGroups: NavGroup[] = [
     title: "运维",
     items: [
       { path: "/system", label: "系统状态", features: "健康度 · 熔断 · 成本", icon: "activity" },
+      {
+        path: "/settings",
+        label: "配置中心",
+        features: "模型 / 接口 / 密钥",
+        icon: "settings",
+      },
     ],
   },
 ];

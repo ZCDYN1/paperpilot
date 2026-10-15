@@ -52,7 +52,7 @@ import structlog
 from langchain_core.messages import AIMessage, BaseMessage
 from pydantic import BaseModel
 
-from app.core.llm import get_llm
+from app.core.llm import ainvoke_structured_raw, get_llm
 from app.core.resilience import BREAKER_LLM, CircuitOpenError, guarded
 from app.observability.events import emit_out_of_band
 from app.observability.resilience_events import RESILIENCE_NODE, sse_observer
@@ -76,6 +76,112 @@ STREAM_ABORT_CODE = "token_stream_aborted"
 def normalize_text(text: str) -> str:
     """折叠空白并统一小写，供"引文是否真在原文里"的包含判定使用。"""
     return _WS_RE.sub(" ", (text or "")).strip().lower()
+
+
+# ---------------------------------------------------------------------------
+# 「引文是否逐字在这一块里」的两段式判定 —— verify 硬校验的两条路径与
+# evidence 的同篇重锚共用这一份定义（判定口径分叉过一次实测代价：
+# read 刚按宽口径救回来的引文，verify 又会按严口径二次杀掉，等于没修）。
+#
+# 背景（真实证据，不是假想敌）：对 20 条抽样引用做独立裁判复核，"折叠空白 + 小写"
+# 的精确比较产生 3/20 假阴性，成因只有两种 PDF/HTML 抽取残留：
+#   1. 原文带着内联引用标号（`... versions [58]. These state-of-the-art ...`），
+#      模型摘录时写成了干净文本（把 `[58]` 去掉了）；
+#   2. 原文标点前多一个空格（`... matches) . The results ...`），模型写成 `matches). The`。
+# 这类引用会被列进导出报告的「未找到原文支撑的结论」，读者以为"这条结论没有证据"，
+# 而事实是"证据在、只是比对方式过严" —— 自动口径因此系统性偏低。
+#
+# 做法：两段式，先按现有口径精确比较，**只有精确失败**才退到"容忍抽取残留"；
+# 且两条通过路径必须可区分（返回值携带路径码，verifier 据此写进
+# verify_note → citations.note，事后能审计"这轮有多少引用是靠归一化救回来的"）。
+#
+# ★ 真实的取舍（别假装没有代价）：两侧同剥内联引用标号之后，引文写 `[57]` 而原文是
+#   `[58]` 也会放行 —— 放宽的只有"方括号里数字标号的正确性"，没放宽的部分是
+#   句子其余文字的逐字相同。接受这个代价的理由：引用标号不是论断的实质内容；
+#   "引对了没编号"实质由定位层（chunk_id 锚定）与人工抽检负责，不归这一层判。
+#   其余情形同理都是"更容易判通过"的方向，所以痕迹必须留（见 quote_match 的返回值）。
+# ---------------------------------------------------------------------------
+
+# 内联引用标号：`[58]` / `[12, 13]` / `[3-5]`（normalize_text 之后只剩单空格，`\s*` 是余量）。
+_INLINE_REF_RE = re.compile(r"\[\d+(?:\s*[,–—-]\s*\d+)*\]")
+# 标点前的多余空白：只在标点前收（`) .` → `).`、` .` → `.`），
+# 正常词间空格不在匹配范围内 —— 否则就不是"容忍残留"而是"改写原文"了。
+_PUNCT_SPACE_RE = re.compile(r"\s+([.,;:!?)\]}])")
+# 弯/直引号混用：PDF 正文是弯引号，模型摘录时一律回吐 ASCII 直引号。
+_QUOTE_TRANS = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"'})
+
+MATCH_EXACT = "exact"
+_MATCH_RESIDUAL_PREFIX = "residual:"
+
+
+def _tol_close_punct_space(text: str) -> str:
+    return _WS_RE.sub(" ", _PUNCT_SPACE_RE.sub(r"\1", text)).strip()
+
+
+def _tol_strip_inline_refs(text: str) -> str:
+    return _WS_RE.sub(" ", _INLINE_REF_RE.sub("", text)).strip()
+
+
+def _tol_straighten_quotes(text: str) -> str:
+    return text.translate(_QUOTE_TRANS)
+
+
+def _tol_markers(text: str) -> str:
+    # 剥标号会留下" ."残渣（标号本来就贴在标点前），折叠标点后空白必须同批做掉 ——
+    # 这是两类残留的机械耦合，不是顺手放宽。
+    return _tol_close_punct_space(_tol_strip_inline_refs(text))
+
+
+def _tol_combined(text: str) -> str:
+    return _tol_straighten_quotes(_tol_markers(text))
+
+
+# 按"解释力从小到大"排列：小规则单独能对上就记在小规则头上，不让组合规则抢功 ——
+# 审计统计要回答的是"到底放宽了什么救回来的"。
+_RESIDUAL_KINDS: tuple[tuple[str, str, Callable[[str], str]], ...] = (
+    ("punct_spacing", "折叠标点前空白", _tol_close_punct_space),
+    ("quotes", "统一弯/直引号", _tol_straighten_quotes),
+    ("citation_markers", "剥离内联引用标号", _tol_markers),
+    ("combined", "组合应用多条残留规则", _tol_combined),
+)
+_RESIDUAL_LABELS: dict[str, str] = {kind: label for kind, label, _fn in _RESIDUAL_KINDS}
+
+
+def quote_match(quote: str, chunk_text: str) -> str:
+    """判"引文逐字在不在这块里"，返回通过路径；空串 = 两层都救不回来 = 真找不到。
+
+    - `"exact"`：现有口径（折叠空白 + 小写）直接命中，什么都没放宽；
+    - `"residual:<类>"`：精确比较失败后、靠某类抽取残留容忍才命中（类码进库当审计痕迹）；
+    - `""`：引文为空，或两段都判不出 —— 后者仍按"未找到原文支撑"处理，闸门不松。
+    """
+    q0 = normalize_text(quote)
+    if not q0:
+        return ""
+    c0 = normalize_text(chunk_text)
+    if q0 in c0:
+        return MATCH_EXACT
+    for kind, _label, fn in _RESIDUAL_KINDS:
+        # ★ 归一化后引文变空串时**必须停下**，不许再判包含：`"" in 任意串` 恒为真，
+        # 于是"整条引文就是一个内联标号"（模型填占位值时的真实形态，如 `[58]`、`[1][2]`）
+        # 会匹配上**任意**一块原文 —— 方向恰好是最危险的那种假阳性：编造/占位引文被判通过，
+        # 重锚还会把它挂到该篇第一个片段上。这一道闸门与"精确比较"的 `if not q0` 同源。
+        normalized_quote = fn(q0)
+        if normalized_quote and normalized_quote in fn(c0):
+            return _MATCH_RESIDUAL_PREFIX + kind
+    return ""
+
+
+def residual_kind(match: str) -> str:
+    """`"residual:citation_markers"` → `"citation_markers"`；非容忍路径返回空串。"""
+    head, sep, tail = match.partition(":")
+    return tail if sep and head == _MATCH_RESIDUAL_PREFIX.rstrip(":") else ""
+
+
+def residual_note(match: str) -> str:
+    """容忍路径通过时写进 verify_note（→ citations.note）的审计痕迹，口径只在这一处定义。"""
+    kind = residual_kind(match)
+    label = _RESIDUAL_LABELS.get(kind, kind)
+    return f"引文在容忍 PDF/HTML 抽取残留后逐字命中（{label}）"
 
 
 def node_event(event_type: str, **data: Any) -> dict[str, Any]:
@@ -120,9 +226,20 @@ async def _structured_call(
     messages: list[BaseMessage],
     temperature: float | None,
 ) -> tuple[Any, dict[str, int]]:
-    """**裸**的结构化调用（不带任何容错）。抽出来只为让"被保护的东西"边界清楚。"""
-    runnable = get_llm(temperature).with_structured_output(schema, include_raw=True)
-    result = await runnable.ainvoke(messages)
+    """**裸**的结构化调用（不带任何容错）。抽出来只为让"被保护的东西"边界清楚。
+
+    走 `ainvoke_structured_raw` 而不是在这里直接 `get_llm(...).with_structured_output(...)`：
+    端点支持哪一种结构化实现是**llm 层要自己探明的事**（实测 DeepSeek 思考模式模型对默认实现
+    回 400），放在节点这一层就等于让每个调用点各自决定用哪种方式 ——
+    漏一处的症状是"四个节点里只有一个能跑通"，而其余三个每次提问都失败。
+
+    `make_llm` 必须显式传：容错/熔断的用例是靠 patch **本模块的 `get_llm`** 来注入失败的。
+    少了这一句，那些 patch 落不到实处，用例不会变红而是**真的去打远端 API**
+    （断言"抛 TransientError"却拿到模型的正常返回，报 DID NOT RAISE，看着像容错坏了）。
+    """
+    result = await ainvoke_structured_raw(
+        schema, messages, temperature, make_llm=lambda: get_llm(temperature)
+    )
     parsed = result.get("parsed")
     raw = result.get("raw")
     return parsed, usage_of(raw)
@@ -441,6 +558,7 @@ def chunk_index(retrieved: list[dict[str, Any]]) -> dict[tuple[str, int], dict[s
 
 __all__ = [
     "CIRCUIT_OPEN_CODE",
+    "MATCH_EXACT",
     "STREAM_ABORT_CODE",
     "TokenSink",
     "chunk_index",
@@ -451,6 +569,9 @@ __all__ = [
     "node_event",
     "normalize_text",
     "prioritize_unread",
+    "quote_match",
+    "residual_kind",
+    "residual_note",
     "structured_invoke",
     "text_invoke",
     "usage_of",

@@ -11,6 +11,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { mockConfig } from "@/mock/fixtures";
 
 const API = process.env.PAPERPILOT_API ?? "http://127.0.0.1:8000";
 
@@ -23,7 +24,7 @@ const backendUp = await fetch(`${API}/healthz`, { signal: AbortSignal.timeout(20
  * CI 开关（本文件唯一一处后端不可达处理逻辑）。
  *
  * 本地：后端不在就整体 skip 是诚实的（跳过比假装通过诚实）。
- * CI：绝对不能 skip —— "后端没起来 → 8 条全跳 → 流水线照样绿"会把这层契约保护变成假的。
+ * CI：绝对不能 skip —— "后端没起来 → 契约行全跳 → 流水线照样绿"会把这层契约保护变成假的。
  * 所以在 CI 环境下探测失败就让本文件在收集阶段直接失败，而不是走到 skipIf。
  * `process.env.CI` 由 CI 预设（GitHub Actions 会置为 "true"）。
  */
@@ -40,6 +41,36 @@ async function json(path: string): Promise<any> {
   const r = await fetch(`${API}${path}`);
   if (!r.ok) throw new Error(`${path} -> ${r.status}`);
   return r.json();
+}
+
+/**
+ * mock 值集合 vs 后端值集合，**分方向**报告差异。
+ *
+ * 为什么不用一句 assert.deepEqual：
+ * - "mock 多写了后端没有的值" → 修法是**删 mock**（界面上会出现必然被 422 拒掉的选项，
+ *   就是当初 rerank_provider 多写 "api" 的那次事故）；
+ * - "mock 漏了后端有的值" → 修法是**补 mock**（真实模式下合法的值在演示模式选不到）。
+ * 两个方向的修法完全相反，失败信息必须分别列出多出来/缺失的**具体值**。
+ */
+function expectMockMatchesBackend(path: string, backendValues: string[], mockValues: string[]) {
+  const beSet = new Set(backendValues);
+  const mockSet = new Set(mockValues);
+  const fabricated = [...mockSet].filter((v) => !beSet.has(v));
+  const missing = [...beSet].filter((v) => !mockSet.has(v));
+
+  expect(
+    fabricated,
+    `${path}：mock 编造了后端没有的值 ${JSON.stringify(fabricated)}` +
+      `（后端合法集合 = ${JSON.stringify(backendValues)}）。修法：删掉 web/src/mock/fixtures.ts 里这些值` +
+      `，合法值以 app/core/config.py 的 Literal 为准，不要反过来"给后端加上"。`,
+  ).toEqual([]);
+
+  expect(
+    missing,
+    `${path}：mock 漏了后端已有的值 ${JSON.stringify(missing)}` +
+      `（后端全集 = ${JSON.stringify(backendValues)}，mock 当前 = ${JSON.stringify(mockValues)}）。` +
+      `修法：把缺失值补进 web/src/mock/fixtures.ts。`,
+  ).toEqual([]);
 }
 
 describe("POST /api/v1/research/stream 的请求体契约", () => {
@@ -210,5 +241,40 @@ describe("GET /api/v1/research/{id}/citations 的 verified 三态", () => {
       const trues = bundle.citations.filter((c: any) => c.verified === true).length;
       expect(bundle.verified_rate).toBeCloseTo(trues / bundle.count, 3);
     }
+  });
+});
+
+describe("mock fixtures 与 GET /api/v1/config 的契约", () => {
+  /**
+   * 这一条是针对本项目真实踩过的坑写的：
+   * `web/src/mock/fixtures.ts` 曾给 `rerank_provider` 手抄出 `["local","api","lexical"]`，
+   * 而后端 `app/core/config.py` 实际是 `Literal["local","lexical"]` —— 配置中心于是
+   * 提供一个必然被 422 拒绝的选项，而 tsc 抓不到（那是 string[]，不是字面量类型）。
+   *
+   * 后端 `GET /config` 的 `options` 是从 Settings 的 Literal **反射**出来的（`typing.get_args`），
+   * 所以拿它当权威对照 mock 的手抄值，不需要人再抄第三份。
+   * 本条**只对照 mock**：SettingsPage 在真实模式下直接消费后端 options，
+   * 它自己的列表漂移由 `ConfigResponse` 类型挡着，不需要这层测试。
+   */
+  it.skipIf(skip)("options 各 provider 字段与 restart_required 必须和后端集合相等；后端新增字段不许静默漏", async () => {
+    const backend = await json("/api/v1/config");
+
+    // 后端契约里这两个字段必须存在且形状对 —— 缺了就直接失败，不能让下面的循环空转"通过"
+    expect(backend.options, "后端 GET /config 没返回 options 对象").toBeTypeOf("object");
+    expect(Array.isArray(backend.restart_required), "后端 GET /config 没返回 restart_required 数组").toBe(true);
+
+    // ★ 先按**后端的字段集合**比字段名：以后反射源加了第 4 个 provider 字段
+    //   （或 mock 自己多编一个字段），这里失败，而不是只比 mock 认识的三个键、新字段静默漏检。
+    expectMockMatchesBackend("options 的字段名集合", Object.keys(backend.options), Object.keys(mockConfig.options));
+
+    for (const [name, values] of Object.entries<any>(backend.options)) {
+      expect(Array.isArray(values), `后端 options.${name} 不是数组`).toBe(true);
+      // mock 这边缺键已由上面字段名断言拦住，这里 ?? [] 只为报错信息更完整
+      const mockValues: string[] = (mockConfig.options as Record<string, string[]>)[name] ?? [];
+      expectMockMatchesBackend(`options.${name} 的可选值`, values, mockValues);
+    }
+
+    // restart_required 决定界面上"改后需重启"的标记；mock 漏一个字段 = 演示模式骗人不该重启
+    expectMockMatchesBackend("restart_required", backend.restart_required, mockConfig.restart_required);
   });
 });

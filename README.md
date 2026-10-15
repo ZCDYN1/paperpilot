@@ -35,6 +35,8 @@
   让出精读候选位（检索候选一篇不删，未读不足时按重排序补位），对应产品定义 F10「下次不重复推荐」
 - **工程化**：tenacity 重试 / 超时 / 熔断、工具入参强校验、Prompt 注入防护、Token 用量统计
 - **可观测与评测**：LangSmith 全链路追踪 + RAGAS 自动评测（均为可选，不配也能跑）
+- **界面内配置**：系统状态页的「配置中心」可直接改 LLM / Embedding / Rerank 的 provider、模型、地址、密钥
+  并写回 `.env`（按行更新、保留注释、自动备份）；填完可先点「测试连通性」再保存，不必去找编辑器改 key
 - **一键部署**：Docker Compose 多服务编排，数据持久化到 volume
 
 ---
@@ -100,6 +102,11 @@ uvicorn app.main:app --reload    # 打开 http://127.0.0.1:8000 就是 React 控
 连真后端调试时在 `web/.env.local` 里写 `VITE_USE_MOCK=0`。
 生产构建读 `web/.env.production`（`VITE_USE_MOCK=0`），而代码级默认同样是"走真实后端"——
 mock 只能被显式打开，否则一次读不到 env 文件的构建就会静默产出一份全是演示数据的前端。
+
+> ⚠️ **改了 `web/src/` 之后必须重新 `npm run build` 才会生效**：后端挂的是构建产物 `web/dist`。
+> 静态文件是**每次请求现读盘**的，所以重建后不必重启进程、刷新浏览器即可；但改了 `app/`（Python 侧）才需要重启。
+> `scripts/launch.py` 启动时会比对 `web/dist` 与 `web/src` 的时间戳，产物比源码旧就打警告并给出
+> `cd web && npm install && npm run build` —— 双击启动却看到旧界面时，先看这条。
 
 > **用 uv 也行**（仓库里的 `uv.lock` 锁定了这套解析结果）：
 > `uv venv --python 3.12 && uv sync --extra dev`（要本地 BGE 再加 `--extra local`）。
@@ -170,11 +177,32 @@ EMBEDDING_DIM=1024
 > ⚠️ **更换 embedding 模型后必须重建索引**（不同模型的向量空间不通用）：
 > `python scripts/build_index.py`
 
+### 界面内配置中心（不想手动改 `.env`）
+
+系统状态页的「**配置中心**」把上面这一小组字段（provider / 模型名 / 接口地址 / 密钥 / `MIN_CORPUS`）
+搬到了界面上，填完可以先点「测试连通性」再保存 —— 它写回的就是根目录的 `.env` 本身
+（按行更新、保留你的注释，改前自动备份成 `.env.bak-<时间戳>`），不引入第二份配置。
+
+| 接口 | 行为 |
+|---|---|
+| `GET /api/v1/config` | 回当前生效值 + 每个字段的来源（`env` / `dotenv` / `default`）。**密钥只回 `{set, masked}`，绝不下发明文** |
+| `PUT /api/v1/config` | 写回 `.env`；改完 `provider` / `model` / `rerank` / `min_corpus` 需要**重启进程**才生效，响应里的 `restart_required` 会把这几项点出来 |
+| `POST /api/v1/config/test` | 探测 LLM 服务连不连得上；地址与密钥可以随请求带上、不必先保存 |
+
+**安全边界（刻意写在这里，因为这是一个默认无鉴权、且会把密钥明文落盘的写接口）**：
+
+- 写接口只接受本机 Host（`localhost` / `127.0.0.1` / `::1`），并拒绝跨站 `Origin` / `Referer`；
+  确实要从别的机器改配置，用 `CONFIG_ALLOWED_HOSTS=<主机名>` 追加（逗号分隔）。
+- 总开关 `CONFIG_WRITABLE`（默认 `true`）。设成 `false` 时 `PUT` 一律 403、`GET` 回 `writable: false`，
+  界面自动变只读；但 `POST /test` **仍可用** —— 它不落盘、只发一次只读探测，只读模式下反而是唯一能验证配置的入口。
+- ⚠️ `API_HOST=0.0.0.0`（默认）+ `CONFIG_WRITABLE=true` 等于"同网段任何人都能改你的配置"。
+  要那样部署，请至少把 `CONFIG_WRITABLE` 设成 `false`。
+
 ---
 
 ## 接口一览
 
-Streamlit 面板只是其中一种客户端，下面这些是对外契约（`http://localhost:8000/docs` 有 OpenAPI）：
+React 控制台与 Streamlit 面板都只是这些接口的客户端，下面这些才是对外契约（`http://localhost:8000/docs` 有 OpenAPI）：
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
@@ -199,9 +227,14 @@ Streamlit 面板只是其中一种客户端，下面这些是对外契约（`htt
 | POST | `/api/v1/papers/ingest` | 按 `arxiv_ids` / `query` 批量抓取入库并刷新索引。**同步返回 200**：arXiv 侧限速约 1 req/3s、单次 50 篇封顶，入库幂等，客户端超时后原样重试就是最优恢复 |
 | GET | `/api/v1/terms?text=…` | 标出文本里的术语及位置（F11） |
 | GET | `/api/v1/terms/{term}` | 查单个术语；未命中是 `200 + known=false`，不是 404（F11） |
+| POST | `/api/v1/terms` | 与 GET 同结果，但正文走请求体（整篇报告 4700+ 字符放不进 query，F11） |
+| POST | `/api/v1/terms/unknown` | 批量问"哪些术语词表里没有"（F11） |
 | GET | `/api/v1/stats/overview` | 全局聚合指标（论文/分块/运行数、平均支撑率、按天 runs 与 tokens），首页卡片与系统页的数据源 |
 | POST | `/api/v1/eval/run` | 触发一次评测（`mode=ablation\|metrics\|ragas`），**202 立刻返回 `eval_run_id`**，评测在后台跑 |
 | GET | `/api/v1/eval/runs/{eval_run_id}` | 查评测状态与结果（`status` + `is_running` + 汇总 + 逐条样本） |
+| GET | `/api/v1/config` | 读取当前生效配置：密钥字段只回 `{set, masked}`、绝不下发明文，并附每字段来源（`env` / `dotenv` / `default`）与 `writable` 开关 |
+| PUT | `/api/v1/config` | 写回根目录 `.env`（按行更新、保留注释、自动备份 `.env.bak-<时间戳>`）；Host 白名单 + 同源校验，`CONFIG_WRITABLE=false` 时 403 |
+| POST | `/api/v1/config/test` | 探测 LLM provider 连通性（地址 / 密钥可随请求带、不必先保存）；**不受 `CONFIG_WRITABLE` 限制** —— 只读模式下它是唯一能验证配置对不对的入口 |
 | GET | `/healthz` | 健康检查 + 索引状态（`index.compatible` 会告诉你换模型后该重建） |
 | GET | `/resilience` | 熔断器实时状态 |
 
@@ -414,13 +447,26 @@ provider 由 `token_usage.model` 反查（mock 模式下 `llm_identity()` 返回
 | 条数 | 现象 | 归因 |
 |---|---|---|
 | 5 | 引文**逐字就在它所指向的那个 chunk 里**，但 `verified=false` | 软校验（让模型判断"这段是否支撑这句论断"）在本地小模型上误判 —— 是裁判模型能力，不是定位或抽取问题 |
-| 3 | `note=引文未能在原文中逐字匹配`，实际差异只在排版 | 逐字比对没做归一化：原文带 PDF 抽取残留的引用号 `[58]`、以及 `matches) .` 这种句号前多一个空格，模型摘录时写成 `matches).` |
+| 3 | `note=引文未能在原文中逐字匹配`，实际差异只在排版 | 当时的逐字比对没做归一化（现已实现，见下）：原文带 PDF 抽取残留的引用号 `[58]`、以及 `matches) .` 这种句号前多一个空格，模型摘录时写成 `matches).` |
 
-第二类的后果是**自动口径系统性偏低**：这些引用会在报告末尾被列进「未找到原文支撑的结论」，
+第二类的后果是**自动口径系统性偏低**：这些引用会被列进「未找到原文支撑的结论」，
 读者看到的是"这条结论没证据"，而事实是"证据在、只是比对方式太严"。
-修复动作很小（比对前剥掉 `[\d+]` 一类的引用标号、折叠标点开头的空白），
-但它会改变自动口径的数值，所以要在接上真实 LLM 之后重跑一次评测再改，
-否则新旧数字无法对比。（**待办**：接上真实 LLM 后先重跑评测拿到新基线，再改比对的归一化规则。）
+
+**这条归因已经落地成实现（2026-10-15）**：`app/agents/nodes/_common.py::quote_match` 把逐字比对
+改成**两段式** —— 先按原口径（折叠空白 + 小写）精确比较，**只有精确失败**才退到"容忍 PDF/HTML
+抽取残留"的容忍层，覆盖三类残留：内联引用标号（`[58]`）、标点前多余空白（`matches) .` → `matches).`）、
+弯引号 vs 直引号。`read` 侧同篇重锚（`evidence.py`）与 `verify` 硬校验共用这一份定义，
+避免"read 刚按宽口径救回来、verify 又按严口径二次杀掉"。
+两条通过路径**必须可区分**：精确通过保持空（落库 NULL），容忍通过把痕迹
+（`residual:citation_markers` / `residual:punct_spacing` / `residual:quotes` 经 `verify_note`）落进
+`citations.note`，所以"这轮有多少条引用是靠归一化救回来的"可以对表统计，不必 grep 服务端日志。
+宽容的方向意味着放宽，代价必须讲清：两侧同剥标号之后，引文写 `[57]` 而原文是 `[58]` 也会放行 ——
+放宽的只有"方括号里数字标号的正确性"，句子其余文字仍须逐字相同；这条取舍钉在
+`tests/test_quote_matching.py::test_marker_number_mismatch_is_a_documented_cost`。
+
+**仍未做（这才是真实遗留）**：归一化会改变自动口径的数值，所以**接上真实 LLM 后需要重跑一次评测
+拿到新基线**，否则新旧数字无法对比。在重跑之前，上面那个 0.61 仍是"归一化前"的成绩，
+不该被当成归一化后的结果引用；把它改写成"已归一化"只是把 3 条的成因讲清楚了，数字本身没动。
 
 也就是说：Verifier 在真实模型下**确实会拒引用**（不是橡皮图章），但离验收线 90% 还有距离。
 
@@ -485,7 +531,18 @@ python -c "import sqlite3;print(sqlite3.connect('data/sqlite/paperpilot.db').exe
 - `resolution_how` 里**非 `exact` 的比例上升** → 是**定位**出问题了（渲染契约或 schema 被改动过）；
 - **仍全是 `exact` 但 `verified` 偏低** → 是**模型**引文保真度问题，不要动校验阈值。
 
-**3. 长期记忆的「避免重复精读」在 24 篇语料上没有发挥空间**
+**3. 端点不支持结构化输出时，会自动降级到可用方式**
+结构化输出在不同 OpenAI 兼容端点上的可用组合不一样，而且**只有真发一次请求才知道**
+（400 是端点回来的，本地无从推断）。`app/core/llm.py::ainvoke_structured_raw` 按顺序试三种组合
+（provider 默认 → `function_calling` + 关思考 → `function_calling`），把第一个成功的记在进程里、
+之后所有节点复用，避免每条问句都先浪费一次 400。换方案只在"请求形状被端点拒绝"时发生
+（状态码 400 且命中 `response_format` / `tool_choice` / `json_schema` / `thinking mode` 标记）；
+401 / 429 / 5xx 一律原样上抛 —— 否则一次真故障会被放大成三次，熔断计数与 token 账单跟着失真。
+降级时会打 `llm.structured_recipe note=端点不支持默认方式，已自动改用这一种`。
+`plan` / `read` / `verify` / `revise` 四个节点都依赖结构化输出，少了这条适配会出现
+"四个节点里只有一个能跑通"的假象。
+
+**4. 长期记忆的「避免重复精读」在 24 篇语料上没有发挥空间**
 实测日志 `read.prioritized_unread known_read=19 reused_read=8 selected=8`：
 8 个精读位全部由已读论文补位，功能正确执行却带不来任何新论文。
 原因是 sample_data 只有 24 篇，其中 18 篇已被真实运行精读过（清理脚本污染后仍未读只有 6 篇）。
@@ -493,7 +550,7 @@ python -c "import sqlite3;print(sqlite3.connect('data/sqlite/paperpilot.db').exe
 判断它是否在工作，看 `known_read>0` —— 若为 0 且整行日志不出现，说明已读清单没读到东西，
 优先怀疑下一项。
 
-**4. 会话内追问可用，但"追问"目前不等于"便宜"**
+**5. 会话内追问可用，但"追问"目前不等于"便宜"**
 `session_id` 是可选的会话加入凭证：客户端传它，本次提问就挂进那个会话，`plan` 节点会读回
 该会话此前的问答（`short_term.load_context`）注入拆解 prompt，指代（"那方法 B"）因此能被补全。
 不传则 `session_id = run_id`，一次提问即一个全新会话（老行为不变）。
@@ -506,18 +563,18 @@ python -c "import sqlite3;print(sqlite3.connect('data/sqlite/paperpilot.db').exe
 长期记忆则是另一套口径：它属于用户、跨会话生效，读取与淘汰都不按会话过滤。
 ⚠️ 若将来接多用户或部署成公共服务，这里**必须**换成显式的 user id，否则记忆会跨用户串。
 
-**5. 评测样本量都很小，不要把小数当稳定值**
+**6. 评测样本量都很小，不要把小数当稳定值**
 自动口径的 0.61 来自 2 条问题 / 18 条引用，0.35 来自 1 条问题 / 26 条引用。
 两者都远不足以支撑"引用准确率是 X"这种表述，只能说明量级和失败归因。
 人工口径的 20 条 `human_verdict` **尚未填写**（抽样已默认只取真实 LLM 的 run），
 所以两个口径目前只有一个能报。
 
-**6. 验证脚本不会污染数据**
+**7. 验证脚本不会污染数据**
 `scripts/verify_agents.py` 跑完整图（含 `finalize` 写记忆），因此它把库**复制到临时目录**再跑，
 结束后删除副本。历史版本直接写真实库，把合成 run 的论文标记成"已读"——
 在长期记忆变成跨会话生效之后，这种污染会让排除机制逐步失效且不报错。
 
-**7. 功能覆盖到哪一步**
+**8. 功能覆盖到哪一步**
 产品定义 §5 的 F1~F19 **后端全部有实现**（`tests/test_api_feature_switches.py` 有一条从 HTTP
 打到节点的真实链路冒烟，其余按功能分文件）。剩下的边界是"每条功能各自不做什么"：
 
@@ -562,10 +619,10 @@ arXiv论文研究Agent/
 │   ├── analysis/            # 方法演进时间线、会议/期刊分档
 │   ├── terms/               # 术语词表与文本标注
 │   ├── followup/            # 基于已校验证据的追问（不重新检索）
-│   └── api/v1/              # research / papers / terms / stats / eval / health
+│   └── api/v1/              # research / papers / terms / stats / eval / config / health
 ├── web/                     # React 控制台（Vite + TS，主界面；构建后由 :8000 同源提供）
 │   ├── src/api/             # 后端契约的 TS 镜像 + 契约测试（打真实后端）
-│   └── src/pages/           # 控制台 / 报告 / 会话 / 论文库 / 分析 / 系统
+│   └── src/pages/           # 控制台 / 报告 / 会话 / 论文库 / 分析 / 系统 / 设置（配置中心）
 ├── ui/streamlit_app.py      # Streamlit 面板（控制台的先行版本，保留作调试入口）
 ├── tests/                   # 单元测试
 ├── sample_data/corpus.json  # 24 篇真实 arXiv 论文的摘要级语料（83KB），零 key 零联网起步
@@ -585,7 +642,7 @@ arXiv论文研究Agent/
 | 数据 | SQLAlchemy 2.0 · SQLite（WAL） |
 | 容错 | tenacity 重试 / 超时 / 熔断 |
 | 观测 | LangSmith（可选）· RAGAS（可选）· Token 统计 |
-| 演示 | Streamlit |
+| 前端 | React · Vite · TypeScript（`web/`，主界面，构建后同源挂载）；Streamlit（`ui/`，先行版本，可选调试入口） |
 | 部署 | Docker + Docker Compose |
 
 ---

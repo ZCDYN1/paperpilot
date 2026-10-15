@@ -25,10 +25,13 @@ import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.agents.nodes._common import (
+    MATCH_EXACT,
     chunk_index,
     merge_usage,
     node_event,
     normalize_text,
+    quote_match,
+    residual_note,
     structured_invoke,
 )
 from app.agents.nodes.evidence import (
@@ -52,7 +55,7 @@ def _hard_check(
     known: dict,
     papers: dict[str, PaperChunks],
     chunk_lookup: dict[int, tuple[str, dict]] | None = None,
-) -> tuple[bool, str, dict, str]:
+) -> tuple[bool, str, dict, str, str]:
     """硬校验：引文必须能在原文里逐字（忽略空白差异）找到。
 
     两步：先按 `(论文, chunk_id)` 精确查，查不到再按逐字引文在**同一篇内**重锚
@@ -67,11 +70,16 @@ def _hard_check(
 
     第四个返回值是**定位路径**（`Resolution.how`；没定位到时为空串），
     供 verify 侧的 `citation_rescue` 事件统计"重锚靠的是哪条路径"。
+
+    第五个返回值是**逐字比较路径**（`quote_match`：`exact` | `residual:<类>` | 空），
+    与定位路径正交：一个答"挂在哪一块"，一个答"怎么对上号的"。
+    容忍抽取残留才通过的引用必须带得上这条痕迹（写进 note 落库），
+    否则判据放宽之后没人能回答"这轮有多少条是靠归一化救回来的"。
     """
     chunk = known.get((citation.get("paper_id"), citation.get("chunk_id")))
     if chunk is not None:
-        ok, reason = _quote_in_chunk(citation, chunk)
-        return ok, reason, (_anchor(chunk, citation.get("paper_id")) if ok else {}), "exact"
+        ok, reason, match = _quote_in_chunk(citation, chunk)
+        return ok, reason, (_anchor(chunk, citation.get("paper_id")) if ok else {}), "exact", match
 
     hit = resolve_citation(
         papers,
@@ -90,9 +98,10 @@ def _hard_check(
             }.get(hit.reason, "引用无法定位"),
             {},
             "",
+            "",
         )
-    ok, reason = _quote_in_chunk(citation, hit.chunk)
-    return ok, reason, (_anchor(hit.chunk, hit.paper_id) if ok else {}), hit.how
+    ok, reason, match = _quote_in_chunk(citation, hit.chunk)
+    return ok, reason, (_anchor(hit.chunk, hit.paper_id) if ok else {}), hit.how, match
 
 
 def _anchor(chunk: dict, paper_id: Any) -> dict:
@@ -111,14 +120,19 @@ def _anchor(chunk: dict, paper_id: Any) -> dict:
     }
 
 
-def _quote_in_chunk(citation: Evidence, chunk: dict) -> tuple[bool, str]:
-    """判"引文逐字在不在这一块里"。与定位分开，两条路径共用同一判定口径。"""
-    quote = normalize_text(citation.get("quote", ""))
-    if not quote:
-        return False, "引文为空"
-    if quote not in normalize_text(chunk.get("text", "")):
-        return False, "引文未能在原文中逐字匹配"
-    return True, ""
+def _quote_in_chunk(citation: Evidence, chunk: dict) -> tuple[bool, str, str]:
+    """判"引文逐字在不在这一块里"。与定位分开，两条路径共用同一判定口径。
+
+    口径只在 `_common.quote_match` 一处定义（两段式：精确比较 → 抽取残留容忍），
+    evidence 的同篇重锚走同一个函数；这里若另起炉灶，同一条引文会被两种严宽度
+    各判一次，失败原因对不上号。
+    """
+    match = quote_match(citation.get("quote", ""), chunk.get("text", ""))
+    if match:
+        return True, "", match
+    if not normalize_text(citation.get("quote", "")):
+        return False, "引文为空", ""
+    return False, "引文未能在原文中逐字匹配", ""
 
 
 async def verify_node(state: ResearchState) -> dict:
@@ -156,7 +170,7 @@ async def verify_node(state: ResearchState) -> dict:
         }
 
     # ---- 第一层：硬校验 ----
-    hard: dict[int, tuple[bool, str, dict, str]] = {}
+    hard: dict[int, tuple[bool, str, dict, str, str]] = {}
     for i, cit in enumerate(citations):
         hard[i] = _hard_check(cit, known, papers_by_id, chunk_lookup)
 
@@ -201,20 +215,30 @@ async def verify_node(state: ResearchState) -> dict:
     # 与 read 侧一样，走 citation_rescue 事件对外报，0 也照发。
     reanchored = 0
     reanchored_by: dict[str, int] = {}
+    # 靠"抽取残留容忍"救回来的条数：精确通过保持空串（库里落 NULL），
+    # 容忍通过写进 note —— 判据放宽的方向是"更容易判通过"，
+    # 不留这条痕迹就永远回答不了"这轮通过率里有多少是归一化贡献的"。
+    residual_matched = 0
     for i, cit in enumerate(citations):
-        hard_ok, hard_reason, anchor, how = hard[i]
+        hard_ok, hard_reason, anchor, how, match = hard[i]
         soft_ok = soft_by_claim.get((cit.get("claim") or "").strip(), True)  # 软校验缺席时不过度拦截
         ok = hard_ok and soft_ok
-        reason = ""
+        note = ""
         if ok:
             ok_count += 1
+            if match != MATCH_EXACT:
+                note = residual_note(match)
+                residual_matched += 1
         else:
-            reason = hard_reason or "LLM 判定引文未直接支撑该论断"
+            # 失败时优先记"为什么没过"（硬原因盖过软原因，维持既有口径）；
+            # 容忍层救回来的痕迹让位给失败原因 —— 反正 verified=False，没人在审计它。
+            note = hard_reason or "LLM 判定引文未直接支撑该论断"
             unsupported.append(cit.get("claim", ""))
-            logger.info("verify.unsupported", claim=cit.get("claim", "")[:60], reason=reason)
-        # `verify_note` 把失败原因随证据带下去，finalize 会把它落进 `citations.note`。
-        # 不落库的话，"为什么没过"就只存在于日志里，人工抽检（架构 §12 的人工口径）无从查证。
-        updated_item: Evidence = {**cit, "verified": ok, "verify_note": reason}
+            logger.info("verify.unsupported", claim=cit.get("claim", "")[:60], reason=note)
+        # `verify_note` 把结论随证据带下去，finalize 会把它落进 `citations.note`：
+        # 失败时是"为什么没过"，通过时（仅容忍路径）是"怎么对上的"。
+        # 不落库的话，这些事实就只存在于日志里，人工抽检（架构 §12 的人工口径）无从查证。
+        updated_item: Evidence = {**cit, "verified": ok, "verify_note": note}
         # 定位被纠正过才记这一笔（精确命中时 anchor 与原值相同，写进去只会让下游误判"有过修复"）
         if anchor and int(anchor["resolved_chunk_id"]) != int(cit.get("chunk_id") or -1):
             updated_item.update(anchor)
@@ -239,7 +263,13 @@ async def verify_node(state: ResearchState) -> dict:
         "checked": len(citations),
         "revision_count": int(state.get("revision_count", 0)),
     }
-    logger.info("verify.done", passed=verification["passed"], score=score, checked=len(citations))
+    logger.info(
+        "verify.done",
+        passed=verification["passed"],
+        score=score,
+        checked=len(citations),
+        residual_matched=residual_matched,
+    )
 
     return {
         "verification": verification,

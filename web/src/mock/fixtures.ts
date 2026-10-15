@@ -1,6 +1,7 @@
 import type {
   CitationBundle,
   ComparisonRow,
+  ConfigResponse,
   HealthResponse,
   OverviewStats,
   PaperDetail,
@@ -355,6 +356,74 @@ export const mockTerms = [
   { term: "RRF", explanation: "Reciprocal Rank Fusion：只取各检索器的排名不取分数，规避分数不可比问题。", source: "术语表" },
   { term: "nDCG@10", explanation: "归一化折损累计增益，衡量前 10 条结果里高相关文档是否排在前面。", source: "术语表" },
 ];
+
+/**
+ * 形状照抄 `app/api/v1/config.py` 的 GET 返回。
+ * 密钥只给"设过了没有 + 掩码"——界面永远拿不到明文，也就永远不会误显示出来。
+ */
+export const mockConfig: ConfigResponse = {
+  values: {
+    llm_provider: "ollama",
+    llm_model: "qwen2.5:7b",
+    llm_temperature: 0.2,
+    llm_structured_method: "auto",
+    llm_disable_thinking: false,
+    openai_base_url: "https://api.openai.com/v1",
+    openai_api_key: "",
+    ollama_base_url: "http://localhost:11434",
+    ollama_model: "qwen2.5:7b",
+    embedding_provider: "local",
+    embedding_model: "BAAI/bge-m3",
+    embedding_api_base_url: "",
+    embedding_api_key: "",
+    rerank_provider: "local",
+    rerank_model: "BAAI/bge-reranker-v2-m3",
+    min_corpus: 8,
+  },
+  secrets: {
+    openai_api_key: { set: false, masked: "" },
+    embedding_api_key: { set: false, masked: "" },
+  },
+  sources: {
+    // ★ 键必须齐：后端按 `EDITABLE` 全量返回，这里少一个字段，真实模式下
+    // 界面对那个字段的"值从哪来"就完全沉默（而 Record<string, X> 抓不到）。
+    llm_provider: "dotenv",
+    llm_model: "dotenv",
+    llm_temperature: "dotenv",
+    llm_structured_method: "default",
+    llm_disable_thinking: "default",
+    openai_base_url: "default",
+    openai_api_key: "default",
+    ollama_base_url: "dotenv",
+    ollama_model: "dotenv",
+    embedding_provider: "dotenv",
+    embedding_model: "default",
+    embedding_api_base_url: "default",
+    embedding_api_key: "default",
+    rerank_provider: "dotenv",
+    rerank_model: "default",
+    min_corpus: "default",
+  },
+  writable: true,
+  restart_required: [
+    "llm_provider",
+    "embedding_provider",
+    "embedding_model",
+    "rerank_provider",
+    "rerank_model",
+    "min_corpus",
+  ],
+  // ★ 这三组选项必须与 `app/core/config.py` 里的 Literal 完全一致。
+  // 真实模式下后端用 `typing.get_args` 反射，所以不会错；mock 是手抄的，最容易说谎。
+  // 曾在这里给 rerank 多写了一个 "api" —— 后端只有 local|lexical，于是 mock 模式
+  // 会提供一个必然被 rejected 的选项。
+  options: {
+    llm_provider: ["openai", "ollama", "mock"],
+    llm_structured_method: ["auto", "function_calling", "json_mode", "json_schema"],
+    embedding_provider: ["local", "api", "mock"],
+    rerank_provider: ["local", "lexical"],
+  },
+};
 
 /** 形状照抄真实 `/healthz`：熔断器快照挂在 `resilience.breakers` 下，字段是 `failure_threshold`。 */
 export const mockHealth: HealthResponse = {

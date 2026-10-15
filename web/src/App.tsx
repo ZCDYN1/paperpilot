@@ -17,6 +17,7 @@ const SessionPage = lazy(() => import("@/pages/SessionPage").then((m) => ({ defa
 const PapersPage = lazy(() => import("@/pages/PapersPage").then((m) => ({ default: m.PapersPage })));
 const AnalyticsPage = lazy(() => import("@/pages/AnalyticsPage").then((m) => ({ default: m.AnalyticsPage })));
 const SystemPage = lazy(() => import("@/pages/SystemPage").then((m) => ({ default: m.SystemPage })));
+const SettingsPage = lazy(() => import("@/pages/SettingsPage").then((m) => ({ default: m.SettingsPage })));
 
 function RouteFallback() {
   return (
@@ -83,6 +84,14 @@ export function App() {
           element={
             <Suspense fallback={<RouteFallback />}>
               <SystemPage />
+            </Suspense>
+          }
+        />
+        <Route
+          path="/settings"
+          element={
+            <Suspense fallback={<RouteFallback />}>
+              <SettingsPage />
             </Suspense>
           }
         />

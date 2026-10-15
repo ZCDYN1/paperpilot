@@ -14,6 +14,13 @@ import os
 os.environ["EMBEDDING_PROVIDER"] = "mock"
 os.environ["RERANK_PROVIDER"] = "lexical"
 os.environ["RERANK_ENABLED"] = "true"
+# ★ 同一条理由还要覆盖 LLM：`.env` 里配的是真实付费端点（openai + key），而测试只靠
+# 逐个 patch 节点层的 `get_llm` 来避免出网。只要有一条路径绕开那个 patch，pytest 就会
+# 真的去打 DeepSeek —— 已经发生过一次：断言"抛 TransientError"的用例拿到真模型的正常
+# 返回，报 DID NOT RAISE，看起来像容错坏了，实际是**测试在花钱**。
+# 默认切 mock 把这条路彻底堵死；确实要验证 openai 构造的用例自己 setenv（成本局部、可审计）。
+os.environ["LLM_PROVIDER"] = "mock"
+os.environ["OPENAI_API_KEY"] = ""
 
 import pytest  # noqa: E402
 

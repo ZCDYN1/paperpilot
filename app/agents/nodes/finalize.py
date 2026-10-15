@@ -152,9 +152,13 @@ async def _persist(state: ResearchState, usage: dict[str, int], by_node: dict | 
                     locator=cit.get("resolved_locator") or cit.get("locator"),
                     source=cit.get("resolved_source") or cit.get("source"),
                     verified=bool(cit.get("verified")),
-                    # 校验失败原因（硬校验/软校验的具体说明）落进 note，供人工抽检口径核对；
-                    # 通过的引用没有失败原因，保持 None 而不是空串，便于区分"没写"与"写了但为空"。
-                    note=(cit.get("verify_note") or None) if not cit.get("verified") else None,
+                    # 校验说明落进 note，供人工抽检口径核对。两种内容共用同一字段：
+                    # ① 失败时的"为什么没过"（硬校验/软校验的具体原因）；
+                    # ② 通过时的"怎么对上的" —— 只有靠抽取残留容忍才通过的引用才非空
+                    #    （精确通过保持空串→None），这样"这轮有多少条是归一化救回来的"
+                    #    可以直接对表统计，不必 grep 服务端日志。
+                    # 保持 None 而不是空串，便于区分"没写"与"写了但为空"。
+                    note=cit.get("verify_note") or None,
                     # 定位路径与"verify 是否重锚过"落库：此前这两个事实只在后端日志里，
                     # `/citations` 与抽检工具都看不到"这条引用是靠哪条兜底路径救回来的"。
                     # resolved_chunk_id 只有 verify 真的纠正过定位时才存在（见 verifier._anchor）。

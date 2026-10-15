@@ -43,6 +43,53 @@ def _http_ok(url: str, timeout: float = 2.0) -> bool:
         return False
 
 
+def _newest_mtime(paths) -> float:
+    newest = 0.0
+    for p in paths:
+        try:
+            newest = max(newest, p.stat().st_mtime)
+        except OSError:  # 文件不存在/被占用都不该让启动器崩
+            continue
+    return newest
+
+
+def _web_source_files() -> list[Path]:
+    """影响构建产物的源文件：`web/src/**` 加上构建配置本身。"""
+    src = ROOT / "web" / "src"
+    files: list[Path] = []
+    if src.is_dir():
+        for path in src.rglob("*"):
+            if path.is_file():
+                files.append(path)
+    for name in ("index.html", "vite.config.ts", "tailwind.config.js", "package.json", "tsconfig.json"):
+        files.append(ROOT / "web" / name)
+    return files
+
+
+def _warn_if_web_bundle_is_stale() -> bool:
+    """构建产物比源码旧就明确说出来 —— "改了界面但看到的还是旧的"几乎总是这个原因。
+
+    这里只警告不自动构建：`npm run build` 要几十秒、还要 Node，双击启动的人
+    未必装得起，替他默默跑掉反而更难解释。返回 True 表示产物是新的。
+    """
+    if not WEB_INDEX.is_file():
+        return False  # 没构建过：走的是 Streamlit 退回路径，那条路自己会说明
+    try:
+        built = WEB_INDEX.stat().st_mtime
+    except OSError:
+        return False
+    source = _newest_mtime(_web_source_files())
+    if source <= built:
+        return True
+    print()
+    print("[!] web/dist 里的前端构建产物比 web/src 旧 —— 界面上看不到刚加的功能是正常的。")
+    print("    重新构建（需要本机有 Node 18+）：")
+    print("      cd web && npm install && npm run build")
+    print("    构建完**刷新浏览器**就能看到新版界面：静态文件是每次请求现读盘的，不用重启。")
+    print("    只有改了 Python 侧（app/）才需要关掉启动窗口再双击一次。")
+    return False
+
+
 def _wait_http(url: str, deadline: float) -> bool:
     end = time.time() + deadline
     while time.time() < end:
@@ -171,6 +218,9 @@ def main() -> int:
     api_proc = ui_proc = None
     use_web_ui = WEB_INDEX.is_file()
     target_url = API_URL if use_web_ui else UI_URL
+    # 产物过期要在**任何分支**之前说，包括"已经在跑、直接打开浏览器"那条：
+    # 他双击后看到旧界面，多半就是这里，而不是"功能没做"。
+    bundle_fresh = _warn_if_web_bundle_is_stale()
 
     # 已有实例在跑就不重复起：双击两次不该变成端口冲突
     api_up = _http_ok(f"{API_URL}/healthz")
@@ -178,6 +228,9 @@ def main() -> int:
     if api_up and panel_up:
         print(f"[i] 检测到 PaperPilot 已经在运行，直接为你打开 {target_url} 。")
         print("    想重启请先关掉那个启动窗口。")
+        if use_web_ui and not bundle_fresh:
+            print("    而且上面说了：构建产物比源码旧。所以这次打开的界面**确实是上一版**，")
+            print("    先按上面的命令构建、再刷新浏览器，功能才会出现。")
         webbrowser.open(target_url)
         time.sleep(1.0)
         return 0
