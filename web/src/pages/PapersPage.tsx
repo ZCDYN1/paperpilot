@@ -155,26 +155,32 @@ function detailToComparisonRow(d: PaperDetail): ComparisonRow {
 }
 
 /**
- * 上传的 4xx/5xx detail 是 `{code, reason, hint?}` dict；
- * client.ts 的 ApiError.message 是它的 JSON.stringify，这里解回来分码给文案。
+ * 后端的 4xx/5xx `detail` 是 `{code, reason, hint?}` dict。
+ * 新链路里 client.ts 的 `detailToText` 已把对象收成一句中文（`reason（hint）`），
+ * detail 本来就是 JSON 字符串的旧链路仍要在这里解回 reason/hint 分开渲染。
+ * 上传和详情加载共用这一份解析 —— 分码只按 ApiError.status，不匹配文案字符串。
  */
-interface UploadIssue {
+function extractReasonHint(message: string): { reason?: string; hint?: string } {
+  try {
+    const d = JSON.parse(message) as { reason?: unknown; hint?: unknown };
+    return {
+      reason: str(d?.reason) ?? undefined,
+      hint: str(d?.hint) ?? undefined,
+    };
+  } catch {
+    return { reason: message || undefined }; // detail 本来就是字符串的端点：整句当原因显示
+  }
+}
+
+interface Issue {
   lead: string;
   reason?: string;
   hint?: string;
 }
 
-function toUploadIssue(e: unknown): UploadIssue {
+function toUploadIssue(e: unknown): Issue {
   if (e instanceof ApiError) {
-    let reason: string | undefined;
-    let hint: string | undefined;
-    try {
-      const d = JSON.parse(e.message) as { reason?: unknown; hint?: unknown };
-      reason = str(d?.reason) ?? undefined;
-      hint = str(d?.hint) ?? undefined;
-    } catch {
-      reason = e.message; // detail 本来就是字符串的端点
-    }
+    const { reason, hint } = extractReasonHint(e.message);
     switch (e.status) {
       case 415:
         return {
@@ -203,6 +209,49 @@ function toUploadIssue(e: unknown): UploadIssue {
   return { lead: e instanceof Error ? `上传失败：${e.message}` : "上传失败" };
 }
 
+/**
+ * 详情加载失败的分码文案 —— 与 toUploadIssue 同一口径（按 status 分码 + 共用 extractReasonHint），
+ * 不再往页面里塞第二套解析。导出仅供纯逻辑用例覆盖。
+ *
+ * tone 只给详情面板用：404 是 warn（琥珀级提示，不是故障），后端 5xx / 连不上才是 error（红）。
+ * 呈现位置的取舍见渲染处注释。
+ */
+export type DetailIssueTone = "warn" | "error";
+
+export interface DetailIssue extends Issue {
+  tone: DetailIssueTone;
+}
+
+export function toDetailIssue(e: unknown, arxivId: string): DetailIssue {
+  if (e instanceof ApiError) {
+    const { reason, hint } = extractReasonHint(e.message);
+    if (e.status === 404) {
+      return {
+        lead: `404 · 库里没有 id 为 ${arxivId} 的论文 —— 大概率是 id 写错了，或者这篇还没入库。`,
+        reason,
+        hint,
+        tone: "warn",
+      };
+    }
+    return {
+      lead: `详情请求失败（HTTP ${e.status}），后端给出的原始原因如下。`,
+      reason,
+      hint,
+      tone: e.status >= 500 ? "error" : "warn",
+    };
+  }
+  const msg = e instanceof Error ? e.message : "";
+  // fetch 连不上后端时 reject 的是 TypeError（"Failed to fetch" 等），没有 status ——
+  // 这是服务没起 / 网络断了，不是"这篇论文不存在"，措辞必须分开，否则用户会去白找论文。
+  if (e instanceof TypeError || /failed to fetch|networkerror|err_network|net::/i.test(msg)) {
+    return {
+      lead: "连不上后端：网络请求失败（不是这篇论文不存在）。请确认后端服务已启动后再重试。",
+      tone: "error",
+    };
+  }
+  return { lead: "详情加载失败（未识别的异常）。", reason: msg || undefined, tone: "error" };
+}
+
 type ListState = "loading" | "ready" | "error";
 
 export function PapersPage() {
@@ -214,6 +263,9 @@ export function PapersPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<PaperDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [detailIssue, setDetailIssue] = useState<DetailIssue | null>(null);
+  // "重试这篇"要让同一个 id 的 effect 重新跑一遍：setSelectedId(同一个值) 不会触发，得靠这个计数器进依赖
+  const [detailReloadTick, setDetailReloadTick] = useState(0);
 
   const [askQ, setAskQ] = useState("");
   const [askLoading, setAskLoading] = useState(false);
@@ -230,7 +282,7 @@ export function PapersPage() {
   const [titleHint, setTitleHint] = useState("");
   const [uploading, setUploading] = useState(false);
   const [uploadResult, setUploadResult] = useState<{ arxiv_id: string; chunks: number } | null>(null);
-  const [uploadIssue, setUploadIssue] = useState<UploadIssue | null>(null);
+  const [uploadIssue, setUploadIssue] = useState<Issue | null>(null);
 
   const [refsBuilding, setRefsBuilding] = useState(false);
   const [refsBatches, setRefsBatches] = useState(0);
@@ -263,21 +315,30 @@ export function PapersPage() {
   useEffect(() => {
     if (!selectedId) {
       setDetail(null);
+      setDetailIssue(null);
       return;
     }
     let alive = true;
     setDetailLoading(true);
+    setDetailIssue(null);
     setAsk(null);
     setAskError("");
+    const id = selectedId;
     api.papers
-      .get(selectedId)
+      .get(id)
       .then((d) => alive && setDetail(d))
-      .catch(() => alive && setDetail(null))
+      // 之前这里 `.catch(() => setDetail(null))` 把错误整个吞掉：404 的"论文不在库中"
+      // 变成了界面上的一片空白，用户无从知道是 id 写错还是没入库。现在如实分码显示。
+      .catch((e: unknown) => {
+        if (!alive) return;
+        setDetail(null);
+        setDetailIssue(toDetailIssue(e, id));
+      })
       .finally(() => alive && setDetailLoading(false));
     return () => {
       alive = false;
     };
-  }, [selectedId]);
+  }, [selectedId, detailReloadTick]);
 
   const toggleCompare = (id: string) => {
     setCompareIds((prev) => {
@@ -651,6 +712,40 @@ export function PapersPage() {
                 <Skeleton height={20} width="60%" />
                 <Skeleton height={80} />
                 <Skeleton height={40} />
+              </div>
+            ) : detailIssue ? (
+              /*
+               * 呈现位置的取舍：错误只出现在详情面板这一块，不给整页盖红色大告警 ——
+               * 404（id 写错 / 没入库）在浏览论文库时是常态，用户随时可以点列表里别的论文，
+               * 所以列表不受影响、面板内给琥珀级提示 + 一个明确出口（回到列表挑一篇）。
+               * 后端故障（5xx / 连不上）才升级成红色，但同样只在面板内，附重试入口。
+               */
+              <div
+                className={`flex flex-col gap-1.5 rounded-lg border bg-white/[0.03] px-3 py-2.5 ${
+                  detailIssue.tone === "error" ? "border-neon-red/40" : "border-neon-amber/40"
+                }`}
+              >
+                <p
+                  className={`text-xs font-medium leading-relaxed ${
+                    detailIssue.tone === "error" ? "text-neon-red" : "text-neon-amber"
+                  }`}
+                >
+                  {detailIssue.lead}
+                </p>
+                {detailIssue.reason && (
+                  <p className="select-all break-words font-mono text-[11px] leading-relaxed text-ink-soft">
+                    后端原因：{detailIssue.reason}
+                  </p>
+                )}
+                {detailIssue.hint && <p className="text-[11px] leading-relaxed text-ink-faint">{detailIssue.hint}</p>}
+                <div className="mt-1 flex gap-2">
+                  <NeonButton variant="secondary" className="px-3 py-1 text-xs" onClick={() => setSelectedId(null)}>
+                    回论文库列表挑一篇
+                  </NeonButton>
+                  <NeonButton variant="secondary" className="px-3 py-1 text-xs" onClick={() => setDetailReloadTick((t) => t + 1)}>
+                    重试这篇
+                  </NeonButton>
+                </div>
               </div>
             ) : !detail ? (
               <EmptyState icon="circle-alert" title="详情加载失败" description="后端未返回该篇详情。" />
