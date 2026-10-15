@@ -563,3 +563,35 @@ async def test_full_chain_offline_smoke(monkeypatch, tmp_path):
 
         cits = (await client.get(f"/api/v1/research/{run_id}/citations")).json()
         assert cits["run_id"] == run_id
+
+
+async def test_completed_run_has_ended_at_and_export_reports_duration(client):
+    """`ended_at` 必须有写入点，否则导出的报告在每次成功研究里都自称"未正常收尾"。
+
+    `app/export/markdown.py` 用 `ended_at - started_at` 算耗时；这一列此前全仓无人写，
+    于是 completed 的 run 导出去拿也只会得到"起止时间不完整"这一行 —— 用户读到的是
+    一份自我矛盾的交付物（正文齐全，尾部却说这次没跑完）。
+    """
+    body = (await client.post(STREAM_URL, json={"question": "RAG 重排的代价", "top_k": 3})).text
+    run_id = first_data(body, "run_started")["run_id"]
+    assert first_data((await client.post(f"/api/v1/research/{run_id}/resume", json={})).text, "done")[
+        "status"
+    ] == "ok"
+
+    listed = (await client.get("/api/v1/research?limit=20")).json()["items"]
+    row = next(r for r in listed if r["run_id"] == run_id)
+    assert row["status"] == "completed"
+    assert row["ended_at"], "run 已 completed 却没落 ended_at"
+    assert row["started_at"], "started_at 应由建 run 时的 func.now() 给出"
+
+    md = (await client.get(f"/api/v1/research/{run_id}/export.md")).text
+    assert "耗时：" in md and "未正常收尾" not in md
+
+
+async def test_awaiting_input_run_keeps_ended_at_null(client):
+    """停在中断点 A 不算跑完：`ended_at` 必须留空，否则耗时把"等用户确认"也算进去。"""
+    body = (await client.post(STREAM_URL, json={"question": "检索融合策略", "top_k": 3})).text
+    run_id = first_data(body, "run_started")["run_id"]
+    row = next(r for r in (await client.get("/api/v1/research?limit=20")).json()["items"] if r["run_id"] == run_id)
+    assert row["status"] == "awaiting_input"
+    assert row["ended_at"] is None

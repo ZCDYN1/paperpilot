@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import UTC, datetime
 
 import structlog
 from fastapi import APIRouter, HTTPException
@@ -162,11 +163,22 @@ async def _register_run(run_id: str, session_id: str, question: str) -> None:
             )
 
 
+#: 走到这些状态就算"这一次跑完了"，需要落 `ended_at`。
+#: `awaiting_input` 不在其中 —— 那是停在 HITL 中断点等人，run 还没结束。
+TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
 async def _update_run_status(run_id: str, status: str) -> None:
     async with session_scope() as db:
         run = await db.get(ResearchRun, run_id)
         if run is not None:
             run.status = status
+            # `ended_at` 此前全仓没有任何写入点：`app/export/markdown.py` 拿它算耗时，
+            # 于是每一次研究的导出报告**无条件**写着"run 未正常收尾，起止时间不完整"，
+            # 而 run 其实是 completed —— 导出的报告里出现自相矛盾的陈述。
+            # 存 UTC：`started_at` 是 `func.now()`（SQLite 下即 UTC），两边同一时钟才能相减。
+            if status in TERMINAL_STATUSES and run.ended_at is None:
+                run.ended_at = datetime.now(UTC)
 
 
 # --------------------------------------------------------------------------- 指标埋点（产品定义 §8）
