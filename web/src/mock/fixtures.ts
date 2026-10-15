@@ -366,8 +366,6 @@ export const mockConfig: ConfigResponse = {
     llm_provider: "ollama",
     llm_model: "qwen2.5:7b",
     llm_temperature: 0.2,
-    llm_structured_method: "auto",
-    llm_disable_thinking: false,
     openai_base_url: "https://api.openai.com/v1",
     openai_api_key: "",
     ollama_base_url: "http://localhost:11434",
@@ -390,8 +388,6 @@ export const mockConfig: ConfigResponse = {
     llm_provider: "dotenv",
     llm_model: "dotenv",
     llm_temperature: "dotenv",
-    llm_structured_method: "default",
-    llm_disable_thinking: "default",
     openai_base_url: "default",
     openai_api_key: "default",
     ollama_base_url: "dotenv",
@@ -419,7 +415,6 @@ export const mockConfig: ConfigResponse = {
   // 会提供一个必然被 rejected 的选项。
   options: {
     llm_provider: ["openai", "ollama", "mock"],
-    llm_structured_method: ["auto", "function_calling", "json_mode", "json_schema"],
     embedding_provider: ["local", "api", "mock"],
     rerank_provider: ["local", "lexical"],
   },

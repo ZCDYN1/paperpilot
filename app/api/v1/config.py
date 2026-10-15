@@ -17,6 +17,9 @@
 2. **密钥永不下发明文**：`GET` 只给 `{set, masked}`。表单里留空提交 = 不修改。
 3. **总开关** `CONFIG_WRITABLE`（默认 true）。设成 false 时 `PUT` 一律 403，
    `GET` 回 `writable: false`，前端自动变只读。
+   它是 `Settings` 上的一个字段（`app/core/config.py`），所以 `.env` 与进程环境变量
+   两种设法都算数 —— 早期这里读的是 `os.environ`，而 `.env` 的值并不会进进程环境，
+   结果是"照文档在 `.env` 里关掉"根本不生效。
    `POST /test` **不受这个开关限制** —— 它不落盘、只发一次只读探测，而只读模式下
    它反而是使用者唯一能验证自己配置对不对的入口。
 
@@ -46,8 +49,6 @@ from pydantic.fields import FieldInfo
 
 from app.core.config import REPO_ROOT, LLMProvider, Settings, get_settings
 
-router_prefix = "/config"
-
 logger = structlog.get_logger(__name__)
 
 ENV_PATH = REPO_ROOT / ".env"
@@ -57,8 +58,6 @@ EDITABLE_ALL: tuple[str, ...] = (
     "llm_provider",
     "llm_model",
     "llm_temperature",
-    "llm_structured_method",
-    "llm_disable_thinking",
     "openai_base_url",
     "openai_api_key",
     "ollama_base_url",
@@ -225,7 +224,7 @@ def _write_env(updates: dict[str, str]) -> str | None:
 
 # --------------------------------------------------------------------- 安全闸门
 def _writable() -> bool:
-    return os.environ.get("CONFIG_WRITABLE", "true").strip().lower() not in {"0", "false", "no"}
+    return get_settings().config_writable
 
 
 def _check_origin(request: Request) -> None:
@@ -235,7 +234,8 @@ def _check_origin(request: Request) -> None:
     任意网页都能对一个跑在本机 8000 上的服务发 POST 来塞配置或换走 provider。
     """
     host = (request.headers.get("host") or "").split(":")[0].strip("[]").lower()
-    allowed = {h.strip().lower() for h in os.environ.get("CONFIG_ALLOWED_HOSTS", "").split(",") if h.strip()}
+    extra = get_settings().config_allowed_hosts
+    allowed = {h.strip().lower() for h in extra.split(",") if h.strip()}
     if host not in _LOCAL_HOSTS | allowed:
         raise HTTPException(status_code=403, detail="只允许本机访问配置写接口")
 

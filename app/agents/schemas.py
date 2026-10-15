@@ -65,8 +65,8 @@ class ExtractionItem(BaseModel):
     claim: str = Field(min_length=1, description="该片段支持的中文论断（一句话）")
     quote: str = Field(min_length=1, description="原文片段，逐字摘录，越长越好但不超过 300 字")
     locator: str = Field(default="abstract", description="章节名 / 页码，便于用户回原文核对")
-    source: Literal["html", "abstract"] = Field(
-        default="abstract", description="证据强度：html=正文原文，abstract=摘要级降级证据"
+    source: Literal["html", "abstract", "pdf"] = Field(
+        default="abstract", description="证据强度：html=正文原文，abstract=摘要级降级证据，pdf=用户上传的 PDF 正文"
     )
 
 

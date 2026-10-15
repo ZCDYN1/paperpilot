@@ -200,9 +200,12 @@ class CitationOut(BaseModel):
     chunk_id: int = Field(description="证据所在 chunk；必须能在本次检索结果中找到（§10 反幻觉）")
     quote: str = Field(description="原文片段")
     locator: str = Field(description="章节 / 页码，便于用户回原文核对")
-    source: Literal["html", "abstract"] = Field(
+    source: Literal["html", "abstract", "pdf"] = Field(
         default="abstract",
-        description="证据强度：html=正文原文，abstract=摘要级降级证据（必须在 UI 上如实标注）",
+        description=(
+            "证据强度：html=正文原文，abstract=摘要级降级证据（必须在 UI 上如实标注），"
+            "pdf=用户上传的全文原文（`POST /papers/upload` 产出的片段，见 `app/ingest/pdf.py`）"
+        ),
     )
     verified: bool = Field(default=True, description="是否通过引用校验；False 表示已标记为幻觉")
 
@@ -216,7 +219,7 @@ class ChunkOut(BaseModel):
     arxiv_id: str
     section: str = "abstract"
     chunk_type: Literal["text", "formula", "table", "figure"] = "text"
-    source: Literal["html", "abstract"] = "abstract"
+    source: Literal["html", "abstract", "pdf"] = "abstract"
     page: int | None = None
     text: str
     token_count: int = 0

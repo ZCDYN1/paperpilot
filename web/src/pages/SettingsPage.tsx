@@ -35,15 +35,11 @@ type Draft = Record<FieldKey, string>;
 
 const SECRET_KEYS: FieldKey[] = ["openai_api_key", "embedding_api_key"];
 const NUMBER_KEYS: FieldKey[] = ["llm_temperature", "min_corpus"];
-/** 布尔项在表单里以 "true"/"false" 字符串存在 Draft 里，提交前转回布尔 */
-const BOOL_KEYS: FieldKey[] = ["llm_disable_thinking"];
 
 const LABELS: Record<FieldKey, string> = {
   llm_provider: "LLM 提供方",
   llm_model: "LLM 模型名",
   llm_temperature: "Temperature",
-  llm_structured_method: "结构化输出方式",
-  llm_disable_thinking: "结构化调用时关掉思考模式",
   openai_base_url: "OpenAI 接口地址",
   openai_api_key: "OpenAI API Key",
   ollama_base_url: "Ollama 服务地址",
@@ -62,8 +58,6 @@ function emptyDraft(): Draft {
     llm_provider: "",
     llm_model: "",
     llm_temperature: "",
-    llm_structured_method: "",
-    llm_disable_thinking: "",
     openai_base_url: "",
     openai_api_key: "",
     ollama_base_url: "",
@@ -497,7 +491,6 @@ export function SettingsPage() {
     const raw: Record<string, string | number | boolean> = {};
     changed.forEach((k) => {
       if (NUMBER_KEYS.includes(k)) raw[k] = Number(draft[k].trim());
-      else if (BOOL_KEYS.includes(k)) raw[k] = draft[k] === "true";
       else raw[k] = draft[k];
     });
     return raw as ConfigValues;
@@ -673,60 +666,6 @@ export function SettingsPage() {
                   hint="越低越稳。检索型任务建议 0 ~ 0.3。"
                 />
               </div>
-
-              {/* 结构化输出方式：接 OpenAI 兼容网关时这是"能不能跑通"的开关，
-                  不接进界面就等于让使用者去猜要往 .env 里塞什么。
-                  ⚠️ 只有后端真的回了这两个字段才渲染 —— 界面提供一个后端不接受的字段，
-                  就是当初 mock 给 rerank 多写 "api" 那个事故的翻版。 */}
-              {typeof config.values.llm_structured_method === "string" ? (
-                <>
-              <div className="flex flex-col gap-1.5">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-sm text-ink">{LABELS.llm_structured_method}</span>
-                  <code className="font-mono text-[11px] text-ink-faint">llm_structured_method</code>
-                  <SourceTag source={config.sources.llm_structured_method} />
-                </div>
-                <ProviderPicker
-                  field="llm_structured_method"
-                  ariaLabel="结构化输出方式"
-                  options={config.options.llm_structured_method}
-                  value={draft.llm_structured_method}
-                  onChange={set("llm_structured_method")}
-                  disabled={disabled}
-                />
-                <p className="text-xs leading-relaxed text-ink-faint">
-                  plan / read / verify / compare 四个节点要靠模型出结构化 JSON。
-                  <code className="font-mono">auto</code> 表示不干预、用端点自己的默认，
-                  ollama 与 mock 走这条没问题；但不少 OpenAI 兼容网关（DeepSeek 实测）会把它回成
-                  <code className="font-mono"> 400 This response_format type is unavailable now</code> ——
-                  症状是<b>普通对话一切正常、研究却每个节点都失败</b>。
-                  这种端点选 <code className="font-mono">function_calling</code>，
-                  并把下面那个开关一起打开。
-                </p>
-              </div>
-
-              <div className="flex flex-col gap-1.5">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-sm text-ink">{LABELS.llm_disable_thinking}</span>
-                  <code className="font-mono text-[11px] text-ink-faint">llm_disable_thinking</code>
-                  <SourceTag source={config.sources.llm_disable_thinking} />
-                </div>
-                <ProviderPicker
-                  field="llm_disable_thinking"
-                  ariaLabel="结构化调用时是否关掉思考模式"
-                  options={["true", "false"]}
-                  value={draft.llm_disable_thinking}
-                  onChange={set("llm_disable_thinking")}
-                  disabled={disabled}
-                />
-                <p className="text-xs leading-relaxed text-ink-faint">
-                  只影响<b>结构化调用</b>：思考模式模型（如 deepseek-flash）在那种请求里不接受
-                  function_calling 所需的 tool_choice，必须关掉思考才通。
-                  写报告那条正文链路不受这个开关影响，不会为了迁就端点把报告质量一起降掉。
-                </p>
-              </div>
-                </>
-              ) : null}
 
               {/* 只有 LLM 这一栏能探测：provider 的合法集合就是 openai / ollama / mock */}
               <LlmConnectivityTest

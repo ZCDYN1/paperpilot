@@ -79,3 +79,29 @@ def test_sub_question_defaults_and_validation():
     assert sq.category is None
     with pytest.raises(ValidationError):
         SubQuestion(id="s2", text="x", keywords=["混合检索"])
+
+
+def test_pdf_source_is_a_valid_evidence_strength():
+    """上传件的字面量必须能被对外结构接住。
+
+    `app/ingest/pdf.py` 把入库片段的 source 写成 "pdf"，而 `ChunkOut` / `CitationOut`
+    早先只认 html|abstract：第一个人上传 PDF，`GET /research/{id}/citations` 就会在
+    响应模型校验上炸掉（本地库只有 abstract/html，所以这条一直没人碰到）。
+    """
+    from app.agents.schemas import ExtractionItem
+    from app.schemas.research import ChunkOut, CitationOut
+
+    ChunkOut(chunk_id=1, arxiv_id="2401.00001", source="pdf", text="t")
+    CitationOut(
+        claim="c",
+        paper_id="2401.00001",
+        chunk_id=1,
+        quote="t",
+        locator="§1",
+        source="pdf",
+    )
+    ExtractionItem(paper_id="2401.00001", chunk_id=1, claim="c", quote="t", source="pdf")
+
+    # 反过来也要拦得住：拼错的值不能悄悄当成 abstract 出去
+    with pytest.raises(ValidationError):
+        ChunkOut(chunk_id=1, arxiv_id="2401.00001", source="pdfe", text="t")

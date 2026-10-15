@@ -183,10 +183,32 @@ async def test_foreign_host_is_refused(client):
     assert r.status_code == 403
 
 
-async def test_readonly_switch_blocks_write(client, monkeypatch):
-    monkeypatch.setenv("CONFIG_WRITABLE", "false")
-    assert (await client.get("/api/v1/config")).json()["writable"] is False
-    assert (await client.put("/api/v1/config", json={"values": {"llm_model": "x"}}, headers=_same_origin())).status_code == 403
+async def test_readonly_switch_blocks_write(monkeypatch, tmp_path):
+    # 开关必须在建 client **之前**设好：它读的是 Settings（进程启动时定型），
+    # 而不是每个请求现查一遍 os.environ —— 后者正是这个开关曾经在 `.env` 场景下
+    # 静默失效的原因。
+    async with _client(monkeypatch, tmp_path, CONFIG_WRITABLE="false") as client:
+        assert (await client.get("/api/v1/config")).json()["writable"] is False
+        assert (
+            await client.put("/api/v1/config", json={"values": {"llm_model": "x"}}, headers=_same_origin())
+        ).status_code == 403
+
+
+def test_readonly_switch_comes_from_the_dotenv_file(tmp_path, monkeypatch):
+    """`.env` 里的 `CONFIG_WRITABLE=false` 必须算数。
+
+    早期 `_writable()` 直读 `os.environ`，而 pydantic-settings 不会把 `.env` 的键写回
+    进程环境 —— 于是照 README 在 `.env` 里关掉之后，接口其实还是可写的。
+    这条用例钉住"开关走 Settings"这个修法本身。
+    """
+    from app.core.config import Settings
+
+    env = tmp_path / ".env"
+    env.write_text("CONFIG_WRITABLE=false\n", encoding="utf-8")
+    loaded = Settings(_env_file=env)
+    assert loaded.config_writable is False, "`CONFIG_WRITABLE` 没被 Settings 读到，说明它不是 Settings 字段"
+    monkeypatch.setattr(config_module, "get_settings", lambda: loaded)
+    assert config_module._writable() is False, "_writable() 没有走 Settings，`.env` 里的开关会静默失效"
 
 
 async def test_secret_never_reaches_the_logs(client, capfd):

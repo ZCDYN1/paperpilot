@@ -308,17 +308,6 @@ export interface ConfigValues {
   llm_provider?: "openai" | "ollama" | "mock";
   llm_model?: string;
   llm_temperature?: number;
-  /**
-   * 结构化输出的实现方式。`auto` = 不干预，用各端点自己的默认。
-   *
-   * ★ 接 OpenAI 兼容网关（DeepSeek 等）时这个值决定**能不能跑通**：
-   * 那些端点会对默认的 json_schema 方式回
-   * `400 This response_format type is unavailable now`，
-   * 症状是"每个结构化节点都失败、而普通对话一切正常"。
-   */
-  llm_structured_method?: "auto" | "function_calling" | "json_mode" | "json_schema";
-  /** true = 结构化调用时关掉思考模式（思考模式端点不接受 function_calling 所需的 tool_choice） */
-  llm_disable_thinking?: boolean;
   openai_base_url?: string;
   openai_api_key?: string;
   ollama_base_url?: string;
@@ -366,7 +355,6 @@ export interface ConfigResponse {
   /** 每个 provider 取值的合法集合，界面下拉照它渲染，不在前端硬编码 */
   options: {
     llm_provider: string[];
-    llm_structured_method: string[];
     embedding_provider: string[];
     rerank_provider: string[];
   };

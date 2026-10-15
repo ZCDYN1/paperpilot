@@ -162,6 +162,14 @@ class Settings(BaseSettings):
     api_port: int = 8000
     log_level: str = "INFO"
 
+    # -------------------------- 配置中心开关 --------------------------
+    # 必须是 Settings 字段，不能像早期那样用 `os.environ.get("CONFIG_WRITABLE")` 读：
+    # pydantic-settings 只把 `.env` 加载进这个模型，**不会**写回进程环境，于是"在
+    # `.env` 里设 CONFIG_WRITABLE=false"当时完全不生效 —— 一个安全开关静默失效，
+    # 比压根没有这个开关更糟（用户以为已经锁死了）。
+    config_writable: bool = True
+    config_allowed_hosts: str = ""
+
     # ---------------------------- 便捷判定 ----------------------------
 
     @property

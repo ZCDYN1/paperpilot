@@ -320,7 +320,9 @@ def _grounded_value(name: str, prompt: str, index: int) -> Any:
         return doc.get("section") or None
     if name == "source":
         src = doc.get("source")
-        return src if src in ("html", "abstract") else None
+        # 与 CitationInput.source 的枚举保持一致：漏掉 "pdf" 会让上传件的 mock 引用
+        # 被降级标成 abstract，离线测试就看不见"证据强度标错"这一类回归。
+        return src if src in ("html", "abstract", "pdf") else None
     return None
 
 
