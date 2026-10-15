@@ -97,7 +97,7 @@ async function readDetail(resp: Response): Promise<string> {
  */
 function detailToText(detail: unknown, statusText: string): string {
   if (typeof detail === "string") return detail;
-  if (Array.isArray(detail)) return JSON.stringify(detail);
+  if (Array.isArray(detail)) return joinValidationErrors(detail);
   if (detail && typeof detail === "object") {
     const d = detail as Record<string, unknown>;
     if (typeof d.reason === "string") {
@@ -106,6 +106,27 @@ function detailToText(detail: unknown, statusText: string): string {
     return JSON.stringify(d);
   }
   return statusText;
+}
+
+/**
+ * pydantic 的 422 错误列表 → 一行可读中文。
+ *
+ * ⚠️ 绝不能整坨 `JSON.stringify`：每一项里带着 `input`，也就是**用户自己刚贴进去的那段文字**
+ * （实测超长问题时后端会把 2100 字符原样回显在 detail 里）。原样渲染的结果是一坨被塞满
+ * 用户输入的 JSON 残骸，既读不懂，也把用户内容重复广播了一遍。
+ */
+function joinValidationErrors(items: unknown[]): string {
+  const parts = items
+    .map((raw) => {
+      if (!raw || typeof raw !== "object") return null;
+      const it = raw as Record<string, unknown>;
+      const loc = Array.isArray(it.loc) ? it.loc.filter((x) => x !== "body").join(".") : "";
+      const field = loc || "请求体";
+      const msg = typeof it.msg === "string" ? it.msg : "格式不正确";
+      return typeof it.loc === "undefined" ? msg : `${field}：${msg}`;
+    })
+    .filter((s): s is string => Boolean(s));
+  return parts.length ? `输入不符合要求 —— ${parts.join("；")}` : "请求体校验未通过";
 }
 
 export class ApiError extends Error {

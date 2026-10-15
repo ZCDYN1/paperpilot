@@ -46,6 +46,20 @@ function only(): Sent {
   return sent[0];
 }
 
+/** 让 fetch 固定回一个带 `detail` 的错误响应（错误渲染用例共用） */
+function stubError(status: number, detail: unknown) {
+  vi.stubGlobal(
+    "fetch",
+    () =>
+      Promise.resolve(
+        new Response(JSON.stringify({ detail }), {
+          status,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+  );
+}
+
 describe("api.config 发出的请求形状", () => {
   it("vitest 跑的是真实模式（否则下面所有断言都会打在 mock 分支上，等于没测）", () => {
     // `web/.env.development` 才开 mock；vitest 的 mode 是 "test"，不加载它。
@@ -80,19 +94,6 @@ describe("api.config 发出的请求形状", () => {
 describe("结构化错误 detail 的渲染", () => {
   // 后端把对外错误从"异常原文"改成 `{code, reason, hint}` 之后，
   // 前端把 detail 整体 stringify 就等于把 `{"code":"not_resumable",...}` 糊在红条上。
-  function stubError(status: number, detail: unknown) {
-    vi.stubGlobal(
-      "fetch",
-      () =>
-        Promise.resolve(
-          new Response(JSON.stringify({ detail }), {
-            status,
-            headers: { "Content-Type": "application/json" },
-          }),
-        ),
-    );
-  }
-
   it("对象 detail 取 reason 给人看，而不是 JSON 残骸", async () => {
     stubError(409, { code: "not_resumable", run_id: "a".repeat(16), status: "completed", reason: "该 run 已经跑完，不能再次续跑" });
     await expect(api.papers.get("2401.00001")).rejects.toThrow("该 run 已经跑完，不能再次续跑");
@@ -107,5 +108,24 @@ describe("结构化错误 detail 的渲染", () => {
   it("字符串 detail 保持原样（历史接口仍在用）", async () => {
     stubError(400, "prompt_injection_detected");
     await expect(api.papers.get("2401.00001")).rejects.toThrow("prompt_injection_detected");
+  });
+
+  it("pydantic 422 的错误列表转成一行中文，且不回显用户刚贴进去的长文本", async () => {
+    // 后端 422 的每一项都带 `input`（用户原文）。整坨 stringify 会把用户输入广播回界面上。
+    const long = "a".repeat(2100);
+    stubError(422, [
+      { type: "string_too_long", loc: ["body", "question"], msg: "String should have at most 2000 characters", input: long },
+    ]);
+    const err = await api.papers.get("2401.00001").catch((e) => e);
+    // 整句钉死：`body` 是 pydantic 的内部层级名，对用户没有信息量，必须滤掉
+    expect(err.message).toBe("输入不符合要求 —— question：String should have at most 2000 characters");
+    expect(err.message, "把用户原文回显到红条上").not.toContain(long);
+  });
+
+  it("422 里没有 loc 的项也不产出 undefined 文案", async () => {
+    stubError(422, [{ type: "missing", msg: "Field required" }]);
+    const err = await api.papers.get("2401.00001").catch((e) => e);
+    expect(err.message).toContain("Field required");
+    expect(err.message).not.toContain("undefined");
   });
 });
