@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -273,6 +274,51 @@ async def recall_history(session_id: str) -> list[dict[str, Any]]:
     ]
 
 
+#: 助手长回答里"算结构"的行：markdown 标题、粗体小节、编号项。
+#: 追问最常见的形态是**序数指代**（"第二种方法的代价"、"第三节那几个数据集"），
+#: 指代对象是报告的结构而不是某句正文 —— 朴素地截前 400 字会把第 2 节之后的小节
+#: 全部裁掉，于是"带了历史"和"带得到位"是两件事（这条是实测出来的，见下面的用例）。
+_OUTLINE_RE = re.compile(r"^\s{0,3}(#{1,6}\s|\*\*|[-*]\s\*\*|\d+[.)、]\s)")
+
+
+#: 骨架里每条最多留多少字。markdown 标题本就短，但 `**（2）免训练的结构化证据评估。** 正文…`
+#: 这种"粗体引导句 + 整段"是一行 —— 不截它就等于把预算全花在第一条上，
+#: 后面几条小标题反而没了，而"第几条"恰恰是追问要指代的东西。
+_OUTLINE_LINE_MAX_CHARS = 48
+
+
+def _clip_history_content(content: str, limit: int) -> str:
+    """把一条长消息压进预算：**先保住小标题清单，再留一段开头正文**。"""
+    if len(content) <= limit:
+        return content
+
+    skeleton = [
+        line.strip()[:_OUTLINE_LINE_MAX_CHARS]
+        for line in content.splitlines()
+        if _OUTLINE_RE.match(line)
+    ]
+    skeleton = [line for line in skeleton if line]
+    if not skeleton:
+        # 没有可识别的结构（纯散文）：退回朴素截断，至少不丢开头的信息
+        return content[:limit] + "…"
+
+    # 提示语本身要占字数，预算里先扣掉
+    budget = max(limit - 40, 60)
+    kept: list[str] = []
+    used = 0
+    for line in skeleton:
+        cost = len(line) + 1
+        # 装不下就少列几条，而不是把某条截成半句话：小标题的价值在"有没有列出来"
+        if used + cost > budget * 2 // 3:
+            break
+        kept.append(line)
+        used += cost
+
+    joined = "\n".join(kept)
+    head = content[: max(budget - used - 20, 0)].strip()
+    return f"（上一轮回答的结构）\n{joined}\n（开头正文）{head}…"
+
+
 def render_history_block(history: list[dict[str, Any]]) -> str:
     """把会话历史渲染成注入 prompt 的上下文块；空历史返回空串。
 
@@ -287,9 +333,7 @@ def render_history_block(history: list[dict[str, Any]]) -> str:
 
     lines: list[str] = []
     for row in history:
-        content = str(row.get("content") or "").strip()
-        if len(content) > HISTORY_MSG_MAX_CHARS:
-            content = content[:HISTORY_MSG_MAX_CHARS] + "…"
+        content = _clip_history_content(str(row.get("content") or "").strip(), HISTORY_MSG_MAX_CHARS)
         if row.get("is_summary"):
             lines.append(f"（更早对话的摘要）{content}")
         elif row.get("role") == "user":

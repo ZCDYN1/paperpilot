@@ -743,12 +743,28 @@ async def research_stream(req: ResearchRequest):
 **短期记忆**（`messages` 表 + LangGraph state）
 - 保留最近 N 轮原文 + 更早轮次的**摘要**（滚动压缩）
 - 跨 run 复用：同一 `session_id` 的新问题能带上之前读过哪些论文
-- 写入：`finalize` 节点追加本轮问答；读回：`plan` 节点调 `short_term.load_context(session_id)`
-  把本会话此前的问答注入拆解 prompt（`app/agents/nodes/planner.py:136` 的
-  `_recall_session_history` → `_history_block`），所以 F9「会话内追问」里"指代能被补全"
-  那条链路是**已接通**的。两条边界：历史块包在 `<session_history>` 标签里、
-  滚动摘要行按 `SUMMARY_NODE` 单独标注（否则模型会把压缩过的骨架当成用户本轮原话）；
-  读回**任何失败都降级为空列表** —— 历史只是辅助信息，`plan` 一挂整次研究就没了，代价差着量级。
+- 写入：`finalize` 节点追加本轮问答（用户提问 + 最终报告两条）。
+- 读回有**两个消费方**，共用同一份实现（`app/memory/short_term.py` 的
+  `recall_history` + `render_history_block`）：
+  - `plan` 节点（`planner.py` 的 `_recall_session_history` → `_history_block`，现在只是薄委托）
+    把它注入拆解子问题的 prompt；
+  - `POST /research/{run_id}/followup`（`app/followup/answer.py`）把它注入追问的 prompt。
+  窗口大小与截断预算只在这一处定义；两个读侧各配一套的后果是"拆解时记得住、追问时记不住"
+  这种没法解释的差别。
+- **长历史按大纲裁剪，不是按字数截断**（`_clip_history_content`）。这条是被实测逼出来的：
+  上一轮报告 6666 字、注入预算 400 字，朴素地截前 400 字只能保住"总体概览 + 第一节"，
+  而追问最常见的形态是**序数指代**（"第二种方法的代价"）—— 指代对象是报告的**结构**，
+  于是表现为"历史确实传进去了，追问仍然答非所问"，日志上完全看不出错。
+  现在的口径是优先保住小标题清单（每条限长，装不下就少列几条而不是截半句），再留一段开头正文；
+  没有可识别结构（纯散文）时退回朴素截断。
+- `followup` 的另一条边界：证据清单的 `[n]` 是**本轮**按 citation id 顺序重编的，
+  与历史里上一轮报告的编号不是同一套。系统提示里显式声明 `[n]` 只对本轮证据有效、
+  历史只用于理解指代 —— 跨轮照抄编号会得到一条看起来可核查、实际指向另一篇论文的引用，
+  比不带引用更糟。
+- 两条固有边界：历史块包在 `<session_history>` 里并声明它是数据（历史中的助手内容是从论文
+  证据写出来的二次引用，不框住可能被当成指令执行，见 §10）；滚动摘要行按 `SUMMARY_NODE`
+  单独标注（否则模型把压缩过的骨架当成用户本轮原话）。读回**任何失败都降级为空列表** ——
+  历史只是辅助信息，为它打断一次研究或追问是错的代价方向。
 
 **长期记忆**（`long_term_memories` 表）
 向量以 `np.float32` BLOB 存在同一张表里，召回时线性扫描算余弦（embedder 已 L2 归一化，
