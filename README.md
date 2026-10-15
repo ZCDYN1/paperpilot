@@ -118,11 +118,15 @@ mock 只能被显式打开，否则一次读不到 env 文件的构建就会静�
 **只想先确认链路是通的**（不填 key、不联网、不下模型）：
 
 ```bash
-LLM_PROVIDER=mock EMBEDDING_PROVIDER=mock INGEST_ENABLED=false \
+LLM_PROVIDER=mock EMBEDDING_PROVIDER=mock RERANK_ENABLED=false INGEST_ENABLED=false \
   python scripts/load_sample_data.py && uvicorn app.main:app
 ```
 
+（与 `Makefile` 的 `make zerokey` 是同一组变量。）
 `INGEST_ENABLED=false` 会关掉联网抓取分支，只用库里已有语料并如实声明覆盖度。
+`RERANK_ENABLED=false` 是必需的：`RERANK_ENABLED` 默认为 `true`，一旦本机恰好缓存着
+reranker 权重（`app/retrieval/reranker.py:228` 的预检命中本地目录或 HF 缓存就不会降级 lexical），
+这条"零模型下载"的演示会去加载 torch 和 2.3GB 权重 —— mock 链路根本不需要重排质量。
 mock 只用于跑通流程，**不要用它评估任何检索或引用质量**（见「评测结果」里的口径说明）。
 
 ---
@@ -207,7 +211,7 @@ React 控制台与 Streamlit 面板都只是这些接口的客户端，下面这
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | POST | `/api/v1/research/stream` | 发起一次研究，`text/event-stream` 流式推进程；跑到拆解后停在中断点 A |
-| POST | `/api/v1/research/{run_id}/resume` | 从中断点 A 继续（可带被用户改过的子问题） |
+| POST | `/api/v1/research/{run_id}/resume` | 从中断点 A 继续（可带被用户改过的子问题）。只有停在 A 的 run 能续：非 `awaiting_input` 状态回 `409 {code:"not_resumable", status}`，run 不存在回 `404 {code:"run_not_found"}` —— 否则任意 run_id 都能被反复触发续跑、白烧配额 |
 | GET | `/api/v1/research?limit=&offset=&status=` | 最近的运行列表（带每次运行的引用数与支撑率；界面上"看哪一次报告"靠它选） |
 | GET | `/api/v1/research/{run_id}` | run 状态、报告正文、对比表、引用、token 用量 |
 | GET | `/api/v1/research/{run_id}/citations` | 引用证据链（含章节定位与证据强度） |
@@ -372,6 +376,10 @@ python scripts/verify_wiring.py        # 离线确定性，约 12 秒；--only A
 - **已知边界（不是 bug，但会误导使用者）**：`INPUT_MAX_CHARS=4000` 对 `question` 够不到 ——
   请求体 schema 先按 `max_length=2000` 拦下并返回 422，这道 400 的闸门只对 schema 没限死的入口生效
   （例如 resume 时用户编辑过的子问题文本）。两处错误的响应结构不同，前端需要分开处理。
+- **对外错误只有码 + 人话**：SSE `error` 事件的 `message` 与论文详情/单篇问答的 404 `detail`
+  都不带异常原文 —— 底层异常可能含 SQL 片段、连接串、含用户名的本机路径，而这是开源仓库，
+  每个 clone 者的部署环境不该从错误响应里被推断出来。完整异常在服务端日志里，
+  排查路径是 `code` + `run_id` → 日志。`code` 与 `recoverable` 是对外契约，不会因脱敏而变动。
 
 ### 用 HTTP 触发评测（`POST /api/v1/eval/run`）
 

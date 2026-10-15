@@ -220,10 +220,10 @@ paperpilot/
 │   └── eval/
 │       ├── ragas_runner.py
 │       ├── ablation.py              # ★ 消融实验脚本
-│       └── datasets/golden_50.jsonl
+│       └── datasets/golden_40.jsonl   # 默认 golden 集（40 条，覆盖 sample_data 全部 24 篇）；golden_20.jsonl 是 5 篇语料时期的对照
 ├── web/                             # React 控制台（Vite + TS，主界面；构建产物 web/dist 由后端同源挂载）
 ├── ui/streamlit_app.py              # Streamlit 面板（控制台的先行版本，可选调试入口）
-├── scripts/{fetch_sample.py,build_index.py,run_eval.py,launch.py}
+├── scripts/{load_sample_data.py,export_sample_data.py,build_index.py,run_eval.py,spotcheck_citations.py,launch.py}
 ├── sample_data/                     # ★ 24 篇真实 arXiv 论文的摘要级语料，保证离线可跑
 ├── tests/                           # 单测（590 个，见 §1.4 验收）
 │   ├── test_fusion.py               # RRF 正确性（含并列名次、空列表边界）
@@ -234,7 +234,7 @@ paperpilot/
 ├── Dockerfile                       # API 镜像
 ├── Dockerfile.ui                    # Streamlit 镜像
 ├── docker-compose.yml · Makefile
-├── .env.example · README.md · README_EN.md · THIRD_PARTY_DATA.md · LICENSE
+├── .env.example · README.md · PaperPilot-产品定义.md · LICENSE
 ```
 
 ---
@@ -593,7 +593,7 @@ RRF 只用**排名**：`Σ 1/(k + rank)`，量纲问题被彻底绕过，且对�
 
 | 方法 | 路径 | 说明 | 实现状态 |
 |---|---|---|---|
-| POST | `/api/v1/research/stream` | **核心**：SSE 流式研究，返回 `text/event-stream` | ✅ |
+| POST | `/api/v1/research/stream` | **核心**：SSE 流式研究，返回 `text/event-stream`；可选 `session_id`（传了则本次提问挂进该会话，`plan` 读回本会话历史 —— F9 的"上下文"那一半） | ✅ |
 | POST | `/api/v1/research/{run_id}/resume` | HITL 恢复（用户确认拆解后继续） | ✅ |
 | GET | `/api/v1/research/{run_id}` | 查询 run 状态与最终报告 | ✅ |
 | GET | `/api/v1/research/{run_id}/citations` | 拿引用证据链（前端画溯源卡片） | ✅ |
@@ -743,9 +743,12 @@ async def research_stream(req: ResearchRequest):
 **短期记忆**（`messages` 表 + LangGraph state）
 - 保留最近 N 轮原文 + 更早轮次的**摘要**（滚动压缩）
 - 跨 run 复用：同一 `session_id` 的新问题能带上之前读过哪些论文
-- ⚠️ **待办**：写入已接通（`finalize` 追加本轮问答），**读回尚未接线** ——
-  `load_context` 目前只被单测调用，没有节点把它注入 prompt，
-  因此产品定义 F9「会话内追问」还不可用。
+- 写入：`finalize` 节点追加本轮问答；读回：`plan` 节点调 `short_term.load_context(session_id)`
+  把本会话此前的问答注入拆解 prompt（`app/agents/nodes/planner.py:136` 的
+  `_recall_session_history` → `_history_block`），所以 F9「会话内追问」里"指代能被补全"
+  那条链路是**已接通**的。两条边界：历史块包在 `<session_history>` 标签里、
+  滚动摘要行按 `SUMMARY_NODE` 单独标注（否则模型会把压缩过的骨架当成用户本轮原话）；
+  读回**任何失败都降级为空列表** —— 历史只是辅助信息，`plan` 一挂整次研究就没了，代价差着量级。
 
 **长期记忆**（`long_term_memories` 表）
 向量以 `np.float32` BLOB 存在同一张表里，召回时线性扫描算余弦（embedder 已 L2 归一化，
@@ -759,8 +762,8 @@ async def research_stream(req: ResearchRequest):
 
 ### 9.1 ★ 读取与淘汰一律跨会话（踩过的坑）
 
-`app/api/v1/research.py:136` 是 `session_id = run_id` —— **一次提问就是一个新会话**
-（那行注释写着"后续「会话内追问」会复用同一个 session_id"，但复用链路属于 F9，尚未接线）。
+`app/api/v1/research.py:265` 的 `session_id = req.session_id or run_id` —— 客户端不传时
+**一次提问就是一个新会话**（传了才串进同一会话，那是短期记忆 F9 的读取键，与长期记忆无关）。
 而长期记忆要等 `finalize` 才写入，于是：
 
 > 按当前 `session_id` 过滤 = 在"这次运行还没写过任何记忆"的时刻查这次运行的记忆 = **恒为空**。
@@ -910,8 +913,9 @@ compare / write 用它做对比与成稿、finalize 用它算"本次覆盖 N 篇
 | `context_recall` | 金标准证据有没有被召回（验证混合检索的价值） |
 | `answer_correctness` | 与人工参考答案的语义一致度 |
 
-- 数据集：`golden_50.jsonl`，50 条「问题 + 人工整理的关键论文 ID + 参考要点」
-- 规模取 50 条即可：人工标注 + 可重复运行，比几百条自动生成的噪声集更有参考价值
+- 数据集：`golden_40.jsonl`（40 条「问题 + 人工整理的关键论文 ID + 参考要点」），
+  它是代码里的默认集（`app/eval/dataset.py:28`），`golden_20.jsonl` 保留作早期对照
+- 规模取 40 条即可：人工标注 + 可重复运行，比几百条自动生成的噪声集更有参考价值
 
 > **指标可比性的前提（直接决定 §5.3 消融表有没有意义）**：
 > `faithfulness` 是**生成端**指标，受生成模型与 prompt 的影响远大于受检索影响。
@@ -923,7 +927,9 @@ compare / write 用它做对比与成稿、finalize 用它算"本次覆盖 N 篇
 **「引用准确率 ≥ 90%」怎么算**：
 - **自动口径**：`citations` 表中 `verified = true` 的占比。Verifier 节点逐条校验时已写回该字段，
   所以这条指标是**免费**的，不需要额外人工。
-- **人工口径（抽检校准）**：周期性从 `golden_50` 里随机抽 20 条人工核对引用是否名副其实，
+- **人工口径（抽检校准）**：周期性从 `citations` 表里随机抽 20 条（`scripts/spotcheck_citations.py`，
+  固定 seed 可复现，默认剔除 mock run —— mock 的 verifier 按设计永远放行，核对它们只会把人工口径拉高）
+  人工核对引用是否名副其实，
   用于校准 Verifier 是否"虚高放行"。**两个口径都要报** —— 只报自动口径等于"自己批改自己的作业"。
 
 **Token 统计**
@@ -986,41 +992,34 @@ provider/model/base_url/key 四项必须同改；`0.61`（18 条引用）与 `0.
 
 ## 14. 部署（Docker Compose）
 
-```yaml
-services:
-  api:
-    build: .
-    ports: ["8000:8000"]
-    env_file: [.env]
-    environment:
-      HF_HOME: /app/.cache/huggingface     # ★ 显式指定，避免非 root 用户下缓存路径漂移
-      DATA_DIR: /app/data
-    volumes:
-      - faiss_index:/app/data/faiss        # 向量索引
-      - sqlite_data:/app/data/sqlite       # 元数据 + checkpoint
-      - hf_cache:/app/.cache/huggingface   # 模型缓存（~3GB，不挂 volume 每次重启重下）
-    healthcheck:
-      # ★ 不能用 curl：python:3.12-slim 镜像里没有 curl，healthcheck 会永远 unhealthy
-      test: ["CMD", "python", "-c", "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz',timeout=3).status==200 else 1)"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 120s                   # ★ 冷启动要加载模型/建索引，给足时间
-    stop_grace_period: 30s                 # ★ 让进行中的 run 有机会落 checkpoint
+编排的唯一事实来源是仓库根目录的 `docker-compose.yml`，这里不再抄一份 YAML ——
+抄进来的副本必然会随着那个文件演进变成"看着对、跑不通"的第二套事实。
+下面只描述服务拓扑与关键 env 的语义，取值请直接读文件。
 
-  ui:
-    build: { context: ., dockerfile: Dockerfile.ui }
-    ports: ["8501:8501"]
-    environment:
-      API_BASE: http://api:8000
-    depends_on:
-      api: { condition: service_healthy }
+**服务拓扑**
+- `api`（`Dockerfile`，宿主 8000）：唯一的产品入口。FastAPI 同源挂载 React 控制台产物（`web/dist`），
+  所以 `http://localhost:8000/` 就是界面，`/docs` 是 API 文档，`/healthz` 是健康检查。
+- `ui`（`Dockerfile.ui`，宿主 8501）：旧 Streamlit 面板，挂在 `profiles: ["legacy-ui"]` 下，
+  默认 `docker compose up` **不启动**它（React 控制台已覆盖 F1~F19 且同源提供，
+  默认再开一个 8501 只会让人误以为那是产品入口）；调试时用 `docker compose --profile legacy-ui up`。
+  它 `depends_on: api`（`condition: service_healthy`），`API_BASE` 指向服务名 `http://api:8000`。
 
-volumes:
-  faiss_index:
-  sqlite_data:
-  hf_cache:
-```
+**关键 env 的语义**
+- 容器内存储路径统一收敛到 `/app/data`（`DATA_DIR` / `FAISS_INDEX_DIR` / `SQLITE_DIR` /
+  `CHECKPOINT_DB` / `SQLITE_URL`），与 `faiss_index` / `sqlite_data` / `hf_cache` 三个 named volume
+  一一对应 —— 路径不收敛是"容器里看得见、重启就没了"的头号原因。
+- `HF_HOME: /app/.cache/huggingface` 必须与 `Dockerfile` 里的 `USER` 一致（见坑 5）。
+- 零 key 冷启动默认值写成 `${VAR:-默认}`：`LLM_PROVIDER`、`EMBEDDING_PROVIDER` 退到 `mock`，
+  `RERANK_ENABLED` 退到 `false`；宿主 `.env` 配了就用你的，没配就用默认 ——
+  目标是「clone 下来直接 `docker compose up` 也能跑通全链路」。
+- `env_file` 标了 `required: false`：不建 `.env` 也能起。
+- `build.args.INSTALL_LOCAL` 默认 `false`（不装 torch，约省 2GB+ 下载与数分钟构建）；
+  要本地 BGE embedding / 真 Reranker 的质量需 `docker compose build --build-arg INSTALL_LOCAL=true`，
+  否则会拿到 `EMBEDDING_PROVIDER=local` 却缺 FlagEmbedding，启动时检索明确报错（不静默降级）。
+- `command` 先跑 `python scripts/load_sample_data.py` 再 `exec uvicorn`：全新用户的 `data/` 是空的，
+  不补样例语料，第一次提问会直接去联网抓 arXiv（该脚本幂等，库里已有论文就原样跳过）。
+- `healthcheck` 用 `python -c` + `urllib.request` 而非 curl（见坑 4），`start_period: 120s`（见坑 6），
+  `stop_grace_period: 30s` 让进行中的 run 有机会落 checkpoint。
 
 **六个必须知道的坑**：
 1. **`hf_cache` volume 是刚需**：bge-m3 + bge-reranker 合计约 3GB，不挂 volume 每次重启都重新下载
@@ -1033,8 +1032,12 @@ volumes:
 6. **`start_period` 不能省**：冷启动要加载 BGE 模型并建索引，可能超过 30s 的 `interval`；
    缺了它，容器会在尚未就绪时被判 unhealthy 然后被反复重启，陷入重启循环。
 
-`.env.example` 必含：`LLM_PROVIDER`、`OPENAI_BASE_URL`、`OPENAI_API_KEY`、`EMBEDDING_MODEL`、
-`RERANK_ENABLED`、`MOCK_LLM`、`LANGCHAIN_API_KEY`、`MAX_REVISION`、`ARXIV_USER_AGENT`。
+`.env.example` 必含：`LLM_PROVIDER`、`OPENAI_BASE_URL`、`OPENAI_API_KEY`、`EMBEDDING_PROVIDER`、
+`EMBEDDING_MODEL`、`RERANK_ENABLED`、`LANGCHAIN_API_KEY`、`MAX_REVISION`、`ARXIV_USER_AGENT`。
+
+> 没有独立的"mock 开关"（不存在 `MOCK_LLM` 这类布尔项）：mock 是 provider 的**取值**——
+> `LLM_PROVIDER=mock`、`EMBEDDING_PROVIDER=mock`（`app/core/config.py:20-21` 的枚举），
+> 这样"换一个后端"和"完全不调模型"在同一处配置里表达，不会出现两个开关互相矛盾的第三态。
 
 > `ARXIV_USER_AGENT` 需使用者填写含邮箱的声明式 UA —— arXiv 官方要求，属合规项。
 
