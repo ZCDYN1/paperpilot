@@ -16,68 +16,29 @@ import { EventTimeline } from "@/components/business/EventTimeline";
 import { SubQuestionEditor } from "@/components/business/SubQuestionEditor";
 import { Chart } from "@/components/charts/Chart";
 import { barChartConfig } from "@/config/charts/bar";
-import { useResearchStream } from "@/hooks/useResearchStream";
+import {
+  CATEGORY_ALL,
+  CATEGORY_CHOICES,
+  DEFAULT_TOP_K,
+  HAS_CODE_VALUE,
+  TOP_K_MAX,
+  TOP_K_MIN,
+  YEAR_MAX,
+  YEAR_MIN,
+  useResearchWorkspace,
+  type FilterForm,
+  type HasCodeChoice,
+} from "@/state/researchWorkspace";
 import { env } from "@/config/env";
-
-const DEFAULT_QUESTION = api.useMock
-  ? "检索增强生成在减少大模型幻觉方面有哪些主流方法，各自的代价是什么？"
-  : "";
 
 /* ============================================================ 表单 → 请求体
    后端 `ResearchRequest` / `ResearchFilters` 都是 `extra="forbid"`
    （`app/schemas/research.py`），多一个键、或者键名写错（cat/since/hasCode 这类
    UI 命名）就是整请求 422。所以界面上的 state 与送出去的请求体**必须是两套形状**，
    中间由 `buildRequest` 单向转换，转换之后的值还要过 `parse*` 的范围校验 ——
-   越界（年份、top_k）同样会被 pydantic 的 ge/le 拒掉。 */
-
-/** 界面上"分类"下拉里代表"不限"的哨兵值，落到请求体是 `categories: []` */
-const CATEGORY_ALL = "all";
-/** 白名单取自 `app/schemas/retrieval.py` 的 `ARXIV_CATEGORIES`，只挑研究最常用的几类 */
-const CATEGORY_CHOICES = ["cs.CL", "cs.LG", "cs.IR", "cs.AI", "cs.CV", "cs.NE", "stat.ML"] as const;
-
-/** `ResearchFilters.year_*` 的 ge/le */
-const YEAR_MIN = 1991;
-const YEAR_MAX = 2100;
-/** `ResearchRequest.top_k` 的 ge/le */
-const TOP_K_MIN = 1;
-const TOP_K_MAX = 50;
-/** 与后端 `ResearchRequest.top_k` 的 default 一致（留空时不覆盖后端默认） */
-const DEFAULT_TOP_K = 8;
-
-/**
- * ★ `has_code` 是三态不是布尔：
- * true=只召回确认有仓库的；false=只召回**未见**仓库的；null=不过滤。
- * 所以界面用三个显式选项，绝不能用 `checked ? true : false` —— 那样"不勾"会
- * 被后端理解成"我要看没有代码的论文"，跟用户预期完全相反。
- */
-type HasCodeChoice = "all" | "only_with" | "only_without";
-
-const HAS_CODE_VALUE: Record<HasCodeChoice, boolean | null> = {
-  all: null,
-  only_with: true,
-  only_without: false,
-};
-
-/** 界面上的控件 state 一律是"文本框里是什么就是什么"，不做即时强转 */
-type FilterForm = {
-  category: string;
-  yearFrom: string;
-  yearTo: string;
-  hasCode: HasCodeChoice;
-  language: "zh" | "en";
-  topK: string;
-  rerank: boolean;
-};
-
-const DEFAULT_FORM: FilterForm = {
-  category: "cs.CL",
-  yearFrom: "2020",
-  yearTo: "",
-  hasCode: "all",
-  language: "zh",
-  topK: String(DEFAULT_TOP_K),
-  rerank: true,
-};
+   越界（年份、top_k）同样会被 pydantic 的 ge/le 拒掉。
+   （表单 state 与 SSE 流本身住在 `@/state/researchWorkspace`，不在本页：
+   切页面不该掐掉一次正在跑的研究，理由写在那个字段的注释里。） */
 
 type Parsed<T> = { value: T; problem: string | null };
 
@@ -185,9 +146,8 @@ function Field({
 
 export function ConsolePage() {
   const [stats, setStats] = useState<OverviewStats | null>(null);
-  const [question, setQuestion] = useState(DEFAULT_QUESTION);
-  const [form, setForm] = useState<FilterForm>(DEFAULT_FORM);
-  const run = useResearchStream();
+  // 流与表单都来自路由之上的工作区：本页可以被随时卸载，研究不能被打断
+  const { run, question, setQuestion, form, setForm } = useResearchWorkspace();
 
   useEffect(() => {
     let alive = true;

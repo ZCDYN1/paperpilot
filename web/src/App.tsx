@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "@/components/layout/AppShell";
 import { DEFAULT_PATH } from "@/config/nav";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { ResearchWorkspaceProvider } from "@/state/researchWorkspace";
 
 /**
  * 页面全部懒加载。
@@ -36,7 +37,11 @@ function RouteFallback() {
 
 export function App() {
   return (
-    <Routes>
+    // 工作区在 <Routes> **外面**：换路由 = 卸载页面组件，如果 SSE 流住在页面里，
+    // 切到别的页面就会 abort 掉这条流，后端随即把 run 落成 cancelled ——
+    // 一次要跑几分钟、还要在中断点等人确认的研究，不该被"顺手看一眼论文库"打断。
+    <ResearchWorkspaceProvider>
+      <Routes>
       <Route element={<AppShell />}>
         <Route path="/" element={<Navigate to={DEFAULT_PATH} replace />} />
         <Route
@@ -97,6 +102,7 @@ export function App() {
         />
         <Route path="*" element={<Navigate to={DEFAULT_PATH} replace />} />
       </Route>
-    </Routes>
+      </Routes>
+    </ResearchWorkspaceProvider>
   );
 }
