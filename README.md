@@ -160,6 +160,20 @@ embedding 有三种模式，按机器条件选：
 | `api` | 走 OpenAI 兼容的 `/v1/embeddings`，无需下模型 |
 | `mock` | 确定性伪向量，仅用于跑通流程与演示；**不含语义**，不要用它评估检索效果 |
 
+`local` 的两个权重（BGE-M3 约 2.1GB、bge-reranker-v2-m3 约 2.3GB）默认从 Hugging Face 拉取，
+国内直连常常拿不到 —— 这是新 clone 者最容易卡死的一步，而且卡点藏在第一次**检索**里
+（启动不报错，检索才报错）。两条出路：
+
+```bash
+# ① 走镜像再建索引（检索失败时的日志里也会原样打出这条命令）
+HF_ENDPOINT=https://hf-mirror.com python scripts/build_index.py
+# ② 或手动把权重下到 models/ 目录，并把 EMBEDDING_MODEL / RERANK_MODEL 指到那些路径（全程离线）
+```
+
+权重缺失时后端不会崩：重排预检（`app/retrieval/reranker.py`）发现本地没有权重就退回词面重排
+并打印获取命令，向量检索按 `MIN_CORPUS` 门槛走降级路径。界面照常可用，只是检索质量下降 ——
+当前用的是哪一档，`/healthz` 的 `embedding.identity` 与 `index.hint` 会如实写出来。
+
 **默认走 API，开箱即用** —— 不占磁盘、不依赖本机算力。LLM 与 embedding 是**互相独立**的配置，
 可以来自不同厂商（例如 LLM 用 DeepSeek，embedding 用阿里云百炼）：
 

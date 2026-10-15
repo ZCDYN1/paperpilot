@@ -259,7 +259,7 @@ class Evidence(TypedDict):
     paper_id: str
     quote: str                 # 原文片段
     locator: str               # 章节/页码，便于溯源
-    source: str                # ★ 该 chunk 来自 html 正文 / abstract 摘要（见 §5.1）
+    source: str                # ★ 证据强度三档：html 正文 / abstract 摘要 / pdf 用户上传全文（见 §5.1）
 
 class ResearchState(TypedDict):
     session_id: str
@@ -462,7 +462,7 @@ A 是差异化卖点必须留；B 属增强项，做成开关即可。
 
 **决定**：正文优先取 **arXiv 官方 HTML 渲染版**（2023-12 之后投稿的论文基本都提供），
 按 `<section>` 结构抽取章节文本。这**不是**"PDF 解析"，而是读取 arXiv 自己发布的 HTML，因此与 D8 不冲突。
-取不到 HTML 的旧论文**降级为摘要块**（`section="abstract"`），并在 `chunk.source` 字段标记 `html | abstract`，
+取不到 HTML 的旧论文**降级为摘要块**（`section="abstract"`），并在 `chunk.source` 字段标记 `html | abstract`（用户上传件写 `pdf`，见 §11 F15），
 供前端在引用卡片上如实显示证据强度（"这是摘要级证据，非正文原文"）。
 
 > 这一条同时修正 D8 的措辞：**「不做全文 PDF 解析」≠「只用摘要」**，而是「不碰 PDF，用官方 HTML」。
@@ -474,7 +474,7 @@ A 是差异化卖点必须留；B 属增强项，做成开关即可。
 |---|---|---|
 | 切分单位 | 按**章节+段落**切，而非固定字符数 | 论文有明确结构（Abstract/Intro/Method/Exp/Conclusion），按结构切语义完整 |
 | 块大小 | 512 tokens，overlap 96 | 中文综述生成需要足够上下文，overlap 防止结论被切断 |
-| 元数据 | `paper_id, section, page, year, primary_category, authors, chunk_index` + **`source(html\|abstract)`** | 支撑 metadata 过滤 + 引用溯源 + 证据强度标注 |
+| 元数据 | `paper_id, section, page, year, primary_category, authors, chunk_index` + **`source(html\|abstract\|pdf)`** | 支撑 metadata 过滤 + 引用溯源 + 证据强度标注 |
 | 特殊块 | 公式、表格、图注**单独成块**并打 `chunk_type` 标记 | 防止公式被切碎后失去语义 |
 | 标题注入 | 每个块前置 `[论文标题] [章节名]` | 小块脱离全文后缺少上下文，低成本高收益 |
 
@@ -594,7 +594,7 @@ RRF 只用**排名**：`Σ 1/(k + rank)`，量纲问题被彻底绕过，且对�
 | 方法 | 路径 | 说明 | 实现状态 |
 |---|---|---|---|
 | POST | `/api/v1/research/stream` | **核心**：SSE 流式研究，返回 `text/event-stream`；可选 `session_id`（传了则本次提问挂进该会话，`plan` 读回本会话历史 —— F9 的"上下文"那一半） | ✅ |
-| POST | `/api/v1/research/{run_id}/resume` | HITL 恢复（用户确认拆解后继续） | ✅ |
+| POST | `/api/v1/research/{run_id}/resume` | HITL 恢复（用户确认拆解后继续）。跑完的 run 不能再续：`completed`/`failed` 回 `409 {code:"not_resumable", status}`，未知 run 回 `404 {code:"run_not_found"}` | ✅ |
 | GET | `/api/v1/research/{run_id}` | 查询 run 状态与最终报告 | ✅ |
 | GET | `/api/v1/research/{run_id}/citations` | 拿引用证据链（前端画溯源卡片） | ✅ |
 | GET | `/api/v1/research/{run_id}/export.md` | 导出 Markdown 报告（F8，含对比表与参考文献） | ✅ |
@@ -701,7 +701,7 @@ async def research_stream(req: ResearchRequest):
 | `interrupted` | **HITL 中断触发** | `at`(A/B), `reason`, `payload`（如可编辑的 `sub_questions[]`）, `resume_token` |
 | `final_report` | 报告生成完 | `markdown`, `citations[]` |
 | `token_usage` | 全流程结束 | `total`, `cost_estimate`, `by_node{}` |
-| `error` | 任何异常 | `node`, `code`, `message`, `recoverable` |
+| `error` | 任何异常 | `node`, `code`, `message`, `recoverable`。⚠️ `message` 是按 code 取的固定中文文案，**不是异常原文**（原文只进服务端日志）；前端契约只依赖 `code` 与 `recoverable` |
 | `done` | 流结束 | `run_id`, `status` |
 | `citation_rescue` | read / verify 各自完成引用定位后 | `node`(read\|verify), `checked`, `rescued`, `dropped`, `recovered_by{}`, `drop_reasons{}` |
 
