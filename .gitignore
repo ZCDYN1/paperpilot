@@ -77,3 +77,7 @@ base_run*.txt
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# 私人材料：简历与本机 AI 助手的工作目录，绝不该进公开仓库
+简历-*.md
+.workbuddy/
